@@ -7,7 +7,7 @@ use crate::profiles;
 use crate::terminal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState {
@@ -26,7 +26,7 @@ pub fn get_services(state: State<'_, AppState>) -> Vec<ServiceConfig> {
 
 #[tauri::command]
 pub fn save_service(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     config: ServiceConfig,
 ) -> Result<(), String> {
@@ -37,6 +37,8 @@ pub fn save_service(
         services.push(config.clone());
     }
     state.config_manager.save_services(&services)?;
+    drop(services);
+    let _ = app.emit("services-changed", ());
     Ok(())
 }
 
@@ -55,7 +57,9 @@ pub fn delete_service(
     let mut services = state.services.lock().unwrap();
     services.retain(|s| s.id != id);
     state.config_manager.save_services(&services)?;
+    drop(services);
     state.log_manager.clear_logs(&id);
+    let _ = app.emit("services-changed", ());
     Ok(())
 }
 
@@ -269,4 +273,123 @@ pub fn open_service_terminal(state: State<'_, AppState>, id: String) -> Result<(
     drop(services);
 
     terminal::open_terminal_at(&work_dir)
+}
+
+// ---------------- 健康检查与资源监控 ----------------
+
+/// 查询服务的健康探针状态。
+#[tauri::command]
+pub fn get_service_health(state: State<'_, AppState>, id: String) -> crate::health::HealthState {
+    state.process_manager.health_manager.get_state(&id)
+}
+
+/// 采样服务进程树的实时 CPU / 内存占用（服务运行中才有数据）。
+#[tauri::command]
+pub fn get_service_metrics(
+    state: State<'_, AppState>,
+    id: String,
+) -> Option<crate::metrics::ServiceMetrics> {
+    state.process_manager.get_metrics(&id)
+}
+
+// ---------------- 配置导出 / 导入 / 克隆 ----------------
+
+/// 导出全部服务配置到 JSON 文件（换电脑 / 团队共享）。返回导出路径。
+#[tauri::command]
+pub async fn export_services(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let services = state.services.lock().unwrap().clone();
+    let json =
+        serde_json::to_string_pretty(&services).map_err(|e| format!("序列化配置失败: {}", e))?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title("导出服务配置")
+        .add_filter("JSON 配置文件", &["json"])
+        .set_file_name("local-service-runner-services.json");
+
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+
+    builder.save_file(move |picked| {
+        let _ = tx.send(picked.map(|p| p.to_string()));
+    });
+
+    let Some(path) = rx.await.map_err(|_| "导出窗口异常关闭".to_string())? else {
+        return Ok(None); // 用户取消
+    };
+
+    std::fs::write(&path, json).map_err(|e| format!("写入导出文件失败: {}", e))?;
+    Ok(Some(path))
+}
+
+/// 从 JSON 文件导入服务配置：同 id 覆盖更新，新 id 追加。返回导入结果；取消返回 None。
+#[tauri::command]
+pub async fn import_services(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::config::ImportSummary>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title("导入服务配置")
+        .add_filter("JSON 配置文件", &["json"]);
+
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+
+    builder.pick_file(move |picked| {
+        let _ = tx.send(picked.map(|p| p.to_string()));
+    });
+
+    let Some(path) = rx.await.map_err(|_| "导入窗口异常关闭".to_string())? else {
+        return Ok(None); // 用户取消
+    };
+
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取配置文件失败: {}", e))?;
+    let incoming: Vec<ServiceConfig> =
+        serde_json::from_str(&content).map_err(|e| format!("配置文件格式错误: {}", e))?;
+
+    let mut services = state.services.lock().unwrap();
+    let (merged, summary) = crate::config::merge_imported(services.clone(), incoming);
+    state
+        .config_manager
+        .save_services(&merged)
+        .map_err(|e| format!("保存配置失败: {}", e))?;
+    *services = merged;
+    drop(services);
+    let _ = app.emit("services-changed", ());
+    Ok(Some(summary))
+}
+
+/// 克隆一份服务配置（新 id + 「副本」后缀名），常用于起多实例调试。
+#[tauri::command]
+pub fn clone_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ServiceConfig, String> {
+    let mut services = state.services.lock().unwrap();
+    let source = services
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+        .ok_or_else(|| "Service not found".to_string())?;
+
+    let cloned = crate::config::clone_config(&source);
+    services.push(cloned.clone());
+    state.config_manager.save_services(&services)?;
+    drop(services);
+    let _ = app.emit("services-changed", ());
+    Ok(cloned)
 }

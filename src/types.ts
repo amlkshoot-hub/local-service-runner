@@ -28,6 +28,33 @@ export interface ServiceConfig {
   skipTests: boolean;
   /** source-main-class：主类全限定名 */
   mainClass?: string | null;
+  /** 服务分组名（业务域），留空归入「未分组」 */
+  group?: string | null;
+  /** 健康检查 URL：绝对地址直接探测；相对路径自动拼 http://127.0.0.1:{port}；留空不检测 */
+  healthCheckUrl?: string | null;
+}
+
+/** 服务健康探针状态 */
+export type HealthState = 'unknown' | 'checking' | 'up' | 'down';
+
+export interface HealthChangeEvent {
+  serviceId: string;
+  health: HealthState;
+}
+
+/** 服务进程树实时资源占用 */
+export interface ServiceMetrics {
+  pid: number;
+  cpuPercent: number | null;
+  memoryMb: number;
+  processCount: number;
+}
+
+/** 配置导入结果 */
+export interface ImportSummary {
+  added: number;
+  updated: number;
+  total: number;
 }
 
 export interface MavenProjectInfo {

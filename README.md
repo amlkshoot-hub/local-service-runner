@@ -234,6 +234,11 @@ cargo build --release
 | `test_service_status_serializes_camel_case_fields` | 验证服务状态 JSON 字段为 camelCase（activeProfiles / startedAt / exitCode） | ✅ PASS |
 | `test_real_jar_lifecycle_and_job_object` | 真实启动 Java 进程、注入 Job Object、捕获输出、正常停止（含重复启动拒绝） | ✅ PASS |
 | `test_service_restart_flow` | 验证重启严格先停后启，新 Profile 生效并重新获得 PID | ✅ PASS |
+| `test_free_port_reports_available` / `test_occupied_port_reports_pid` | 验证端口预检：空闲放行、占用可解析占用者 PID | ✅ PASS |
+| `test_resolve_health_url_variants` / `test_parse_http_url` | 验证健康检查 URL 解析（绝对/相对/缺端口拼接规则） | ✅ PASS |
+| `test_http_get_against_real_listener` | 真实 TCP 环境验证零依赖 HTTP 探针：200 判定、无服务端口拒绝 | ✅ PASS |
+| `test_merge_imported_appends_and_overwrites` / `test_merge_imported_empty_existing` | 验证导入合并：同 id 覆盖、新 id 追加、顺序保持 | ✅ PASS |
+| `test_clone_config_gets_new_identity` | 验证克隆生成新 id 与「副本」名称 | ✅ PASS |
 
 > 集成测试通过 `CARGO_MANIFEST_DIR` 定位仓库内的 `fixtures/demo-spring-service`，克隆到任意路径均可运行；若夹具 JAR 不存在则自动跳过。
 
@@ -244,6 +249,18 @@ cargo build --release
 3. **平台限定**：进程控制、管道读取与命令行拼装均针对 Windows 实现，暂不支持 macOS / Linux。
 
 ## 更新记录
+
+### 2026-11-18（四）——健康探针、托盘常驻、聚合日志与资源监控
+- **健康探针**：服务运行后周期 GET 健康检查端点（配置项 `healthCheckUrl`，相对路径自动拼 `http://127.0.0.1:{端口}`），状态栏新增「健康 / 不可用 / 检测中」徽章——从「进程活着」升级为「真的能服务请求」。零 HTTP 依赖（手写本机 HTTP/1.1 GET，读到状态行即刻判定）。
+- **端口预检**：启动前探测端口占用，被占直接拦截并提示占用者 PID（GetExtendedTcpTable），不再让 Spring Boot 起来一半才报 `Port already in use`。
+- **系统托盘 + 崩溃通知**：关闭按钮隐藏到托盘（进程治理与日志后台继续），托盘菜单动态列出全部服务及状态、支持一键启停；服务异常退出时弹 Windows 系统通知。
+- **CPU / 内存监控**：基于 Job Object 枚举进程树采样（CPU 时间差分 + 工作集内存），状态栏实时徽章 + CPU 走势 sparkline（2s 采样，仅运行中开启）。
+- **多服务日志聚合流**：控制台支持「单服务 / 聚合全部」视图切换，跨服务调用链同屏观测，每行带服务色块标签，过滤支持内容与服务名双维度。
+- **服务分组 + 一键启停**：侧栏按业务域分节（`group` 字段，配置弹窗 datalist 自动补全），组头悬浮「一键启动 / 停止」整组服务。
+- **配置导入 / 导出 / 克隆**：全量配置一键导出 JSON（换机 / 团队共享）；导入同 id 覆盖更新、新 id 追加；服务一键克隆后直接进入编辑（改端口 / 名称一气呵成）。
+- **JVM 参数模板**：JAR / 构建+JAR 模式一键插入堆内存、远程调试 5005·8000、GC 日志常用参数。
+- 修复：应用启动时已在运行的服务不触发指标轮询的时序问题（状态加载后同步轮询）。
+- 测试 27 → 35 项全部通过；前端 vue-tsc + 构建通过；mock Tauri IPC 实景截图验证（分组 / 聚合 / 健康徽章 / 指标区无缺陷）。
 
 ### 2026-11-18（三）
 - **界面现代化全面重构**：深空蓝黑底色系 + 靛紫渐变强调色，全局 CSS 设计令牌（色彩 / 圆角 / 阴影 / 等宽字体）统一驱动两个组件。

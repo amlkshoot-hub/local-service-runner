@@ -18,6 +18,21 @@
           />
         </div>
 
+        <!-- 分组 -->
+        <div class="form-group">
+          <label>服务分组（同组可在侧栏一键启停）</label>
+          <input
+            v-model="form.group"
+            list="group-name-options"
+            type="text"
+            class="input-field"
+            placeholder="例如: 订单域（留空归入未分组）"
+          />
+          <datalist id="group-name-options">
+            <option v-for="g in existingGroups" :key="g" :value="g" />
+          </datalist>
+        </div>
+
         <!-- 工作目录 -->
         <div class="form-group">
           <label>工作目录 (Work Directory) <span class="required">*</span></label>
@@ -289,6 +304,18 @@
             class="input-field"
             placeholder="例如: --server.port=8081 -Dmy.param=value"
           />
+          <div v-if="hasJvm" class="jvm-template-row">
+            <span class="jvm-template-label">快速插入:</span>
+            <span
+              v-for="tpl in JVM_TEMPLATES"
+              :key="tpl.label"
+              class="jvm-template-chip"
+              :title="tpl.args"
+              @click="insertJvmTemplate(tpl)"
+            >
+              {{ tpl.label }}
+            </span>
+          </div>
         </div>
 
         <!-- 默认 Profile -->
@@ -331,6 +358,20 @@
                 />
               </div>
             </div>
+            <div class="form-group">
+              <label>健康检查 URL (周期探测服务是否真正可用，留空不检测)</label>
+              <input
+                v-model="form.healthCheckUrl"
+                type="text"
+                class="input-field"
+                placeholder="例如: /actuator/health（相对路径自动拼 http://127.0.0.1:{端口}）"
+              />
+              <div class="module-hint">
+                <span class="hint-info">
+                  ℹ 绝对地址直接探测；相对路径按上方「显示端口号」拼接。状态栏将显示 健康 / 不可用 / 检测中。
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -356,6 +397,8 @@ import type { MainClassCandidate, MavenProjectInfo, ServiceConfig } from '../typ
 const props = defineProps<{
   isOpen: boolean;
   serviceData?: ServiceConfig | null;
+  /** 现有分组名（datalist 自动补全） */
+  existingGroups?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -403,6 +446,36 @@ const form = ref<ServiceConfig>({
   buildGoal: 'package',
   skipTests: true,
   mainClass: '',
+  group: '',
+  healthCheckUrl: '',
+});
+
+/** JVM 快速插入模板 */
+const JVM_TEMPLATES = [
+  { label: '堆内存', args: '-Xms512m -Xmx1024m' },
+  { label: '远程调试 5005', args: '-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005' },
+  { label: '远程调试 8000', args: '-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000' },
+  { label: 'GC 日志', args: '-Xlog:gc*:file=gc.log:time,uptime:filecount=5' },
+];
+
+/** 当前启动方式是否运行在 JVM 上（决定是否显示 JVM 模板） */
+const hasJvm = computed(
+  () => form.value.launchType === 'jar' || form.value.launchType === 'maven-build-jar'
+);
+
+function insertJvmTemplate(tpl: { label: string; args: string }) {
+  const current = argsString.value.trim();
+  if (current.includes(tpl.args)) return;
+  argsString.value = current ? `${current} ${tpl.args}` : tpl.args;
+}
+
+const existingGroups = computed(() => {
+  const set = new Set<string>();
+  for (const g of props.existingGroups || []) {
+    const t = (g || '').trim();
+    if (t) set.add(t);
+  }
+  return [...set];
 });
 
 const isMavenBasedLaunch = computed(() =>
@@ -434,6 +507,8 @@ watch(
         form.value.mavenModule = form.value.mavenModule || '';
         form.value.mainClass = form.value.mainClass || '';
         form.value.jarPath = form.value.jarPath || '';
+        form.value.group = form.value.group || '';
+        form.value.healthCheckUrl = form.value.healthCheckUrl || '';
         argsString.value = (form.value.args || []).join(' ');
         profilesString.value = (form.value.selectedProfiles || []).join(',');
       } else {
@@ -456,6 +531,8 @@ watch(
           buildGoal: 'package',
           skipTests: true,
           mainClass: '',
+          group: '',
+          healthCheckUrl: '',
         };
         argsString.value = '';
         profilesString.value = 'dev';
@@ -703,6 +780,8 @@ function save() {
   payload.buildGoal = normalizedBuildGoal;
   payload.skipTests = normalizedSkipTests;
   payload.mainClass = normalizedMainClass;
+  payload.group = (form.value.group || '').trim() || null;
+  payload.healthCheckUrl = (form.value.healthCheckUrl || '').trim() || null;
   // 构建+JAR 模式下 jarPath 允许留空（自动定位），其余非 JAR 模式清空
   if (form.value.launchType !== 'maven-build-jar' && form.value.launchType !== 'jar') {
     payload.jarPath = '';
@@ -944,6 +1023,37 @@ function save() {
   font-size: 11px;
   margin-top: 2px;
   line-height: 1.6;
+}
+
+/* JVM 模板 chips */
+.jvm-template-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.jvm-template-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.jvm-template-chip {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--accent-soft);
+  background: rgba(99, 102, 241, 0.09);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  padding: 2px 9px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.jvm-template-chip:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.55);
 }
 
 .hint-ok {

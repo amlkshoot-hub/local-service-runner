@@ -11,6 +11,12 @@
         <span class="stat-text">
           共 {{ services.length }} 个服务，{{ runningCount }} 个运行中
         </span>
+        <button class="btn ghost icon-only-btn" title="导入服务配置（同 id 覆盖，新 id 追加）" @click="importConfig">
+          <AppIcon name="upload" :size="14" />
+        </button>
+        <button class="btn ghost icon-only-btn" title="导出全部服务配置到 JSON 文件" @click="exportConfig">
+          <AppIcon name="download" :size="14" />
+        </button>
         <button class="btn primary add-btn" @click="openAddModal">
           <AppIcon name="plus" :size="14" />
           添加服务
@@ -33,54 +39,77 @@
         </div>
 
         <div class="services-list">
-          <div
-            v-for="svc in filteredServices"
-            :key="svc.id"
-            :class="['service-item', { active: currentService?.id === svc.id }]"
-            @click="selectService(svc)"
-          >
-            <!-- 状态圆点 -->
-            <div
-              :class="['status-dot', getStatusClass(svc.id)]"
-              :title="getStatusText(svc.id)"
-            ></div>
-
-            <div class="service-meta">
-              <div class="service-name-row">
-                <span class="service-name" :title="svc.name">{{ svc.name }}</span>
-                <span v-if="svc.port" class="service-port">:{{ svc.port }}</span>
-              </div>
-              <div class="service-sub-row">
-                <span class="type-tag">{{ getLaunchTypeLabel(svc.launchType) }}</span>
-                <span class="profile-preview" :title="svc.selectedProfiles.join(',')">
-                  {{ svc.selectedProfiles.join(',') || 'default' }}
-                </span>
-              </div>
+          <div v-for="group in groupedServices" :key="group.name" class="service-group">
+            <div class="group-header">
+              <span class="group-name" :title="group.name">{{ group.name }}</span>
+              <span class="group-count">{{ group.items.length }}</span>
+              <span class="group-actions">
+                <button
+                  class="group-action-btn"
+                  title="一键启动本组全部服务"
+                  @click="groupStartAll(group.items)"
+                >
+                  <AppIcon name="play" :size="11" />
+                </button>
+                <button
+                  class="group-action-btn stop"
+                  title="一键停止本组全部服务"
+                  @click="groupStopAll(group.items)"
+                >
+                  <AppIcon name="stop" :size="10" />
+                </button>
+              </span>
             </div>
 
-            <!-- 悬浮快捷控制 -->
-            <div class="service-actions" @click.stop>
-              <button
-                v-if="!isRunning(svc.id) && !isStarting(svc.id) && !isBuilding(svc.id)"
-                class="action-icon-btn start-icon"
-                title="启动"
-                @click="startService(svc.id)"
-              >
-                <AppIcon name="play" :size="13" />
-              </button>
-              <button
-                v-if="isRunning(svc.id) || isStarting(svc.id) || isBuilding(svc.id)"
-                class="action-icon-btn stop-icon"
-                title="停止"
-                @click="stopService(svc.id)"
-              >
-                <AppIcon name="stop" :size="12" />
-              </button>
+            <div
+              v-for="svc in group.items"
+              :key="svc.id"
+              :class="['service-item', { active: currentService?.id === svc.id }]"
+              @click="selectService(svc)"
+            >
+              <!-- 状态圆点 -->
+              <div
+                :class="['status-dot', getStatusClass(svc.id)]"
+                :title="getStatusText(svc.id)"
+              ></div>
+
+              <div class="service-meta">
+                <div class="service-name-row">
+                  <span class="service-name" :title="svc.name">{{ svc.name }}</span>
+                  <span v-if="svc.port" class="service-port">:{{ svc.port }}</span>
+                </div>
+                <div class="service-sub-row">
+                  <span class="type-tag">{{ getLaunchTypeLabel(svc.launchType) }}</span>
+                  <span class="profile-preview" :title="svc.selectedProfiles.join(',')">
+                    {{ svc.selectedProfiles.join(',') || 'default' }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- 悬浮快捷控制 -->
+              <div class="service-actions" @click.stop>
+                <button
+                  v-if="!isRunning(svc.id) && !isStarting(svc.id) && !isBuilding(svc.id)"
+                  class="action-icon-btn start-icon"
+                  title="启动"
+                  @click="startService(svc.id)"
+                >
+                  <AppIcon name="play" :size="13" />
+                </button>
+                <button
+                  v-if="isRunning(svc.id) || isStarting(svc.id) || isBuilding(svc.id)"
+                  class="action-icon-btn stop-icon"
+                  title="停止"
+                  @click="stopService(svc.id)"
+                >
+                  <AppIcon name="stop" :size="12" />
+                </button>
+              </div>
             </div>
           </div>
 
           <div v-if="services.length === 0" class="empty-list-tip">
-            暂无服务配置，点击右上角 “+ 添加服务” 开始
+            暂无服务配置，点击右上角「添加服务」开始
           </div>
         </div>
       </aside>
@@ -107,10 +136,13 @@
                 </div>
               </div>
 
-              <!-- 右侧编辑/删除 -->
+              <!-- 右侧编辑/克隆/删除 -->
               <div class="service-mgmt-btns">
                 <button class="btn ghost sm" @click="openEditModal">
                   <AppIcon name="edit" :size="12" /> 编辑
+                </button>
+                <button class="btn ghost sm" title="克隆服务配置（起多实例调试）" @click="cloneCurrentService">
+                  <AppIcon name="copy" :size="12" /> 克隆
                 </button>
                 <button class="btn ghost danger-ghost sm" @click="confirmDeleteService">
                   <AppIcon name="trash" :size="12" /> 删除
@@ -257,6 +289,30 @@
                 <span v-if="mavenTaskBadge" :class="['task-badge', mavenTaskBadge.cls]">
                   {{ mavenTaskBadge.text }}
                 </span>
+                <span
+                  v-if="getHealthBadge(currentService.id)"
+                  :class="['task-badge', 'health-badge', getHealthBadge(currentService.id)!.cls]"
+                  title="健康探针：周期性 GET 健康检查端点"
+                >
+                  <AppIcon name="activity" :size="11" />
+                  {{ getHealthBadge(currentService.id)!.text }}
+                </span>
+                <div v-if="currentMetrics" class="metrics-box" title="进程树实时占用（每 2s 采样）">
+                  <svg class="spark" width="72" height="18" viewBox="0 0 72 18" preserveAspectRatio="none">
+                    <polyline
+                      v-if="cpuSparkPoints"
+                      :points="cpuSparkPoints"
+                      fill="none"
+                      stroke="var(--accent)"
+                      stroke-width="1.5"
+                    />
+                  </svg>
+                  <span class="metrics-text">
+                    CPU {{ currentMetrics.cpuPercent !== null ? currentMetrics.cpuPercent.toFixed(1) : '—' }}%
+                    · {{ currentMetrics.memoryMb }} MB
+                    · {{ currentMetrics.processCount }}P
+                  </span>
+                </div>
                 <span class="state-label">{{ getStatusText(currentService.id) }}</span>
                 <span v-if="getPid(currentService.id)" class="pid-tag">
                   PID: {{ getPid(currentService.id) }}
@@ -270,6 +326,21 @@
             <div class="console-toolbar">
               <div class="toolbar-left">
                 <span class="console-title"><AppIcon name="terminal" :size="13" /> 实时控制台</span>
+                <div v-if="services.length > 1" class="view-switch">
+                  <button
+                    :class="['view-switch-btn', { active: !aggregatedView }]"
+                    @click="aggregatedView = false"
+                  >
+                    单服务
+                  </button>
+                  <button
+                    :class="['view-switch-btn', { active: aggregatedView }]"
+                    @click="aggregatedView = true"
+                  >
+                    聚合全部
+                  </button>
+                </div>
+                <span v-if="aggregatedView" class="log-count">{{ services.length }} 服务</span>
                 <span class="log-count">{{ filteredLogs.length }} 行</span>
               </div>
               <div class="toolbar-right">
@@ -289,8 +360,7 @@
                 </label>
                 <button class="btn ghost sm" @click="clearLogs">
                   <AppIcon name="trash" :size="12" /> 清空
-                </button>
-                <button class="btn ghost sm" @click="copyLogs">
+                </button>                <button class="btn ghost sm" @click="copyLogs">
                   <AppIcon name="copy" :size="12" />
                   {{ copyTip || '复制全部' }}
                 </button>
@@ -304,6 +374,14 @@
                 :key="idx"
                 :class="['log-row', getLogLevelClass(log.level)]"
               >
+                <span
+                  v-if="aggregatedView && log.svcId"
+                  class="svc-tag"
+                  :style="{ color: svcColor(log.svcId), borderColor: svcColor(log.svcId) }"
+                  :title="log.svcName"
+                >
+                  {{ (log.svcName || '').slice(0, 12) }}
+                </span>
                 <span class="log-time">{{ log.timestamp }}</span>
                 <span :class="['log-level', log.level]">{{ formatLevel(log.level) }}</span>
                 <span class="log-content">{{ log.content }}</span>
@@ -326,6 +404,7 @@
     <ServiceModal
       :is-open="isModalOpen"
       :service-data="editingService"
+      :existing-groups="allGroupNames"
       @close="isModalOpen = false"
       @saved="onServiceSaved"
     />
@@ -339,10 +418,14 @@ import { listen } from '@tauri-apps/api/event';
 import ServiceModal from './components/ServiceModal.vue';
 import AppIcon from './components/AppIcon.vue';
 import type {
+  HealthChangeEvent,
+  HealthState,
+  ImportSummary,
   MavenProjectInfo,
   MavenTaskStatus,
   MavenTaskStatusEvent,
   ServiceConfig,
+  ServiceMetrics,
   ServiceStatus,
   LogEntry,
   ServiceLogEvent,
@@ -371,6 +454,17 @@ const customProfileInput = ref('');
 // Maven 工具箱任务状态：serviceId -> MavenTaskStatus
 const mavenTaskMap = ref<Record<string, MavenTaskStatus>>({});
 
+// 健康探针状态：serviceId -> HealthState
+const healthMap = ref<Record<string, HealthState>>({});
+
+// 聚合日志视图：跨服务同屏观测
+const aggregatedView = ref(false);
+
+// 当前服务实时指标与历史采样（sparkline 用）
+const currentMetrics = ref<ServiceMetrics | null>(null);
+const metricsHistory = ref<Array<{ cpu: number | null; mem: number }>>([]);
+let metricsTimer: ReturnType<typeof setInterval> | null = null;
+
 // 日志视窗控制
 const logFilter = ref('');
 const autoScroll = ref(true);
@@ -398,11 +492,52 @@ const currentLogs = computed(() => {
   return logsMap.value[currentService.value.id] || [];
 });
 
+// 视图日志：聚合模式取所有服务合并，单服务模式取当前服务
+const viewLogs = computed<Array<LogEntry & { svcId?: string; svcName?: string }>>(() => {
+  if (!aggregatedView.value) {
+    const list = currentLogs.value;
+    const svc = currentService.value;
+    return svc ? list.map((l) => ({ ...l, svcId: svc.id, svcName: svc.name })) : list;
+  }
+  const result: Array<LogEntry & { svcId: string; svcName: string }> = [];
+  for (const [svcId, list] of Object.entries(logsMap.value)) {
+    const svc = services.value.find((s) => s.id === svcId);
+    if (!svc) continue;
+    for (const l of list) {
+      result.push({ ...l, svcId, svcName: svc.name });
+    }
+  }
+  result.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return result;
+});
+
 const filteredLogs = computed(() => {
-  const all = currentLogs.value;
+  const all = viewLogs.value;
   if (!logFilter.value.trim()) return all;
   const q = logFilter.value.toLowerCase();
-  return all.filter((l) => l.content.toLowerCase().includes(q));
+  return all.filter(
+    (l) =>
+      l.content.toLowerCase().includes(q) ||
+      (l.svcName || '').toLowerCase().includes(q)
+  );
+});
+
+// 侧栏分组视图：按 group 字段分节，「未分组」排在最后
+const groupedServices = computed<Array<{ name: string; items: ServiceConfig[] }>>(() => {
+  const map = new Map<string, ServiceConfig[]>();
+  for (const s of filteredServices.value) {
+    const g = (s.group || '').trim() || '未分组';
+    if (!map.has(g)) map.set(g, []);
+    map.get(g)!.push(s);
+  }
+  const entries = [...map.entries()];
+  entries.sort((a, b) => {
+    const ua = a[0] === '未分组';
+    const ub = b[0] === '未分组';
+    if (ua !== ub) return ua ? 1 : -1;
+    return a[0].localeCompare(b[0]);
+  });
+  return entries.map(([name, items]) => ({ name, items }));
 });
 
 // 当前服务是否 Maven 系启动方式（决定是否展示 Maven 工具箱）
@@ -437,6 +572,42 @@ const mavenTaskBadge = computed<{ text: string; cls: string } | null>(() => {
   return null;
 });
 
+// CPU 采样 sparkline 折线点
+const cpuSparkPoints = computed(() => {
+  const n = metricsHistory.value.length;
+  if (n < 2) return '';
+  const W = 72;
+  const H = 18;
+  return metricsHistory.value
+    .map((m, i) => {
+      const x = (i / (n - 1)) * W;
+      const y = H - (Math.min(m.cpu ?? 0, 100) / 100) * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+});
+
+// 服务标签色块（聚合日志视图中区分不同服务）
+const SVC_COLORS = [
+  '#818cf8', '#f472b6', '#34d399', '#fbbf24', '#60a5fa',
+  '#c084fc', '#2dd4bf', '#fb923c', '#a5b4fc', '#4ade80',
+];
+function svcColor(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return SVC_COLORS[h % SVC_COLORS.length];
+}
+
+// 全部已使用的分组名（配置弹窗 datalist 补全）
+const allGroupNames = computed(() => {
+  const set = new Set<string>();
+  for (const s of services.value) {
+    const g = (s.group || '').trim();
+    if (g) set.add(g);
+  }
+  return [...set];
+});
+
 onMounted(async () => {
   await loadServices();
   await loadAllStatuses();
@@ -462,12 +633,25 @@ onMounted(async () => {
   await listen<StatusChangeEvent>('service-status-change', (event) => {
     const { serviceId, status } = event.payload;
     statusMap.value[serviceId] = status;
+    // 选中服务的运行状态变化 → 同步指标轮询
+    if (currentService.value?.id === serviceId) {
+      syncMetricsPolling();
+      if (status.type !== 'running') {
+        currentMetrics.value = null;
+      }
+    }
   });
 
   // 监听 Maven 工具箱任务状态变更
   await listen<MavenTaskStatusEvent>('maven-task-status-change', (event) => {
     const { serviceId, status } = event.payload;
     mavenTaskMap.value[serviceId] = status;
+  });
+
+  // 监听健康探针状态推送
+  await listen<HealthChangeEvent>('service-health-change', (event) => {
+    const { serviceId, health } = event.payload;
+    healthMap.value[serviceId] = health;
   });
 });
 
@@ -478,6 +662,16 @@ async function loadServices() {
     if (list.length > 0 && !currentService.value) {
       selectService(list[0]);
     }
+    // 预加载所有服务日志，聚合视图可随时切换
+    for (const svc of list) {
+      if (!logsMap.value[svc.id]) {
+        try {
+          logsMap.value[svc.id] = await invoke<LogEntry[]>('get_service_logs', { id: svc.id });
+        } catch (err) {
+          console.error('Failed to preload logs:', err);
+        }
+      }
+    }
   } catch (err) {
     console.error('Failed to load services:', err);
   }
@@ -487,6 +681,8 @@ async function loadAllStatuses() {
   try {
     const statuses = await invoke<Record<string, ServiceStatus>>('get_all_service_statuses');
     statusMap.value = statuses;
+    // 状态加载完成后再同步一次指标轮询（启动时已在运行的服务不会有状态事件触发）
+    syncMetricsPolling();
   } catch (err) {
     console.error('Failed to load statuses:', err);
   }
@@ -514,6 +710,18 @@ async function selectService(svc: ServiceConfig) {
   } catch (err) {
     console.error('Failed to load maven task status:', err);
   }
+
+  // 加载该服务的健康探针状态
+  try {
+    healthMap.value[svc.id] = await invoke<HealthState>('get_service_health', { id: svc.id });
+  } catch (err) {
+    console.error('Failed to load health state:', err);
+  }
+
+  // 指标采样随选中服务切换重置
+  currentMetrics.value = null;
+  metricsHistory.value = [];
+  syncMetricsPolling();
 
   // 扫描该服务支持的 profiles（多模块工程需要定位到启动模块的 resources）
   currentModule.value = (svc.mavenModule || '').trim();
@@ -669,6 +877,111 @@ async function openTerminal() {
   }
 }
 
+// 分组一键启停：按列表顺序串行触发
+async function groupStartAll(items: ServiceConfig[]) {
+  for (const svc of items) {
+    if (!isRunning(svc.id) && !isStarting(svc.id) && !isBuilding(svc.id)) {
+      await invoke('start_service', { id: svc.id }).catch(() => {});
+    }
+  }
+}
+
+async function groupStopAll(items: ServiceConfig[]) {
+  for (const svc of items) {
+    if (isRunning(svc.id) || isStarting(svc.id) || isBuilding(svc.id)) {
+      await invoke('stop_service', { id: svc.id }).catch(() => {});
+    }
+  }
+}
+
+// 健康探针徽章
+function getHealthBadge(id: string): { text: string; cls: string } | null {
+  if (!isRunning(id)) return null;
+  const health = healthMap.value[id];
+  if (!health || health === 'unknown') return null;
+  if (health === 'up') return { text: '健康', cls: 'ok' };
+  if (health === 'down') return { text: '不可用', cls: 'err' };
+  return { text: '检测中', cls: 'running' };
+}
+
+// 指标轮询：仅当前选中服务处于 Running 时开启
+function syncMetricsPolling() {
+  const running =
+    !!currentService.value &&
+    (statusMap.value[currentService.value.id]?.type === 'running');
+
+  if (running && metricsTimer === null) {
+    metricsTimer = setInterval(async () => {
+      if (!currentService.value) return;
+      try {
+        const metrics = await invoke<ServiceMetrics | null>('get_service_metrics', {
+          id: currentService.value!.id,
+        });
+        if (metrics) {
+          currentMetrics.value = metrics;
+          metricsHistory.value.push({ cpu: metrics.cpuPercent, mem: metrics.memoryMb });
+          if (metricsHistory.value.length > 40) {
+            metricsHistory.value.shift();
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load metrics:', err);
+      }
+    }, 2000);
+  } else if (!running && metricsTimer !== null) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+}
+
+// 配置导入 / 导出 / 克隆
+async function exportConfig() {
+  try {
+    const path = await invoke<string | null>('export_services');
+    if (path) {
+      alert(`已导出 ${services.value.length} 个服务配置到:\n${path}`);
+    }
+  } catch (err: any) {
+    alert('导出失败: ' + (err?.message || err));
+  }
+}
+
+async function importConfig() {
+  try {
+    const summary = await invoke<ImportSummary | null>('import_services');
+    if (summary) {
+      await loadServices();
+      if (currentService.value) {
+        const refreshed = services.value.find((s) => s.id === currentService.value!.id);
+        if (refreshed) selectService(refreshed);
+      }
+      alert(
+        `导入完成：新增 ${summary.added} 个，更新 ${summary.updated} 个，当前共 ${summary.total} 个服务`
+      );
+    }
+  } catch (err: any) {
+    alert('导入失败: ' + (err?.message || err));
+  }
+}
+
+async function cloneCurrentService() {
+  if (!currentService.value) return;
+  try {
+    const cloned = await invoke<ServiceConfig>('clone_service', {
+      id: currentService.value.id,
+    });
+    await loadServices();
+    const fresh = services.value.find((s) => s.id === cloned.id);
+    if (fresh) {
+      selectService(fresh);
+      // 克隆后直接进入编辑：改名 / 改端口一气呵成
+      openEditModal();
+    }
+  } catch (err: any) {
+    alert('克隆失败: ' + (err?.message || err));
+  }
+}
+
 function isRunning(id: string) {
   return statusMap.value[id]?.type === 'running';
 }
@@ -795,6 +1108,14 @@ async function confirmDeleteService() {
 
 // 日志控制
 function clearLogs() {
+  if (aggregatedView.value) {
+    // 聚合模式：清空所有服务的日志
+    for (const svcId of Object.keys(logsMap.value)) {
+      logsMap.value[svcId] = [];
+      invoke('clear_service_logs', { id: svcId }).catch(console.error);
+    }
+    return;
+  }
   if (!currentService.value) return;
   const id = currentService.value.id;
   logsMap.value[id] = [];
@@ -1698,6 +2019,158 @@ body {
 
 .empty-title {
   letter-spacing: 0.3px;
+}
+
+/* 服务分组 */
+.service-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px 4px;
+  user-select: none;
+}
+
+.group-name {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-count {
+  font-size: 9.5px;
+  color: var(--text-3);
+  background: rgba(148, 163, 184, 0.1);
+  padding: 0 5px;
+  border-radius: 8px;
+  font-family: var(--font-mono);
+}
+
+.group-actions {
+  display: inline-flex;
+  gap: 1px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.service-group:hover .group-actions {
+  opacity: 1;
+}
+
+.group-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border: none;
+  background: none;
+  border-radius: 5px;
+  color: var(--ok);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.group-action-btn:hover {
+  background: rgba(52, 211, 153, 0.14);
+}
+.group-action-btn.stop {
+  color: var(--danger);
+}
+.group-action-btn.stop:hover {
+  background: rgba(248, 113, 113, 0.14);
+}
+
+/* 顶栏图标按钮 */
+.icon-only-btn {
+  padding: 6px 8px;
+}
+
+/* 健康探针徽章 */
+.health-badge {
+  font-weight: 600;
+}
+
+/* 实时指标区 */
+.metrics-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: rgba(148, 163, 184, 0.07);
+  border: 1px solid var(--line-1);
+}
+
+.metrics-box .spark {
+  display: block;
+  opacity: 0.95;
+}
+
+.metrics-text {
+  font-size: 10.5px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* 日志视图切换 */
+.view-switch {
+  display: inline-flex;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  border-radius: 7px;
+  padding: 1px;
+  gap: 1px;
+}
+
+.view-switch-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.view-switch-btn:hover {
+  color: var(--text-2);
+}
+
+.view-switch-btn.active {
+  background: rgba(99, 102, 241, 0.22);
+  color: var(--accent-soft);
+  font-weight: 600;
+}
+
+/* 聚合日志服务标签 */
+.svc-tag {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid;
+  background: rgba(148, 163, 184, 0.05);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  margin-top: 1px;
 }
 
 /* ============ 按钮系统 ============ */

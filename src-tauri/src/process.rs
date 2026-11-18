@@ -87,6 +87,8 @@ pub struct ProcessManager {
     statuses: Arc<Mutex<HashMap<String, ServiceStatus>>>,
     instances: Arc<Mutex<HashMap<String, ActiveInstance>>>,
     log_manager: LogManager,
+    pub health_manager: crate::health::HealthManager,
+    pub metrics_manager: crate::metrics::MetricsManager,
 }
 
 impl ProcessManager {
@@ -95,6 +97,8 @@ impl ProcessManager {
             statuses: Arc::new(Mutex::new(HashMap::new())),
             instances: Arc::new(Mutex::new(HashMap::new())),
             log_manager,
+            health_manager: crate::health::HealthManager::new(),
+            metrics_manager: crate::metrics::MetricsManager::new(),
         }
     }
 
@@ -179,6 +183,28 @@ impl ProcessManager {
                 },
             );
             return Err(err);
+        }
+
+        // 2.5 端口预检：被占用时直接拦截，避免启动到一半才报 Port already in use
+        if let Some(port) = config.port {
+            if let Some(owner) = crate::port::check_port_availability(port)? {
+                let owner_desc = match owner {
+                    Some(pid) => format!("（占用进程 PID: {}）", pid),
+                    None => String::new(),
+                };
+                let err = format!("端口 {} 已被占用{}，无法启动服务。请释放端口或修改配置中的端口号。", port, owner_desc);
+                self.log_manager
+                    .append_log(app_handle, &config.id, err.clone(), "system");
+                self.set_status(
+                    app_handle,
+                    &config.id,
+                    ServiceStatus::Failed {
+                        exit_code: None,
+                        error: err.clone(),
+                    },
+                );
+                return Err(err);
+            }
         }
 
         // 3. 构建 Profile 参数与完整启动参数
@@ -461,8 +487,14 @@ impl ProcessManager {
         let watched_pid_holder = std::sync::Arc::new(std::sync::Mutex::new(0u32));
 
         let watched_pid_for_cb = std::sync::Arc::clone(&watched_pid_holder);
+        let health_mgr_cb = self.health_manager.clone();
+        let metrics_mgr_cb = self.metrics_manager.clone();
         let on_exit = Box::new(move |code_opt: Option<i32>| {
             let watched_pid = *watched_pid_for_cb.lock().unwrap();
+
+            // 服务进程退出：同步停止健康探针与资源采样基线
+            health_mgr_cb.stop_checker(&service_id);
+            metrics_mgr_cb.clear(&service_id);
 
             // 清理实例（只清理本次启动创建的实例，避免误删重启后的新实例）
             let (h_job_to_close, h_proc_to_close) = {
@@ -554,6 +586,10 @@ impl ProcessManager {
                 started_at,
             },
         );
+
+        // 服务进入 Running：启动健康探针（未配置健康检查 URL 则静默跳过）
+        self.health_manager
+            .start_checker(app_handle, config, config.id.clone());
 
         Ok(())
     }
@@ -808,6 +844,9 @@ impl ProcessManager {
         service_id: &str,
         timeout_secs: u64,
     ) -> Result<(), String> {
+        // 停止前先停掉健康探针，避免停止过程中状态闪烁
+        self.health_manager.stop_checker(service_id);
+
         // 先复制一份句柄：监听线程会在进程退出时关闭原始句柄，
         // 停止流程必须持有自己的副本，避免并发关闭 / 句柄复用造成的误关闭。
         #[cfg(windows)]
@@ -966,6 +1005,19 @@ impl ProcessManager {
                 CloseHandle(h_process);
             }
         }
+        self.health_manager.stop_all();
+    }
+
+    /// 采样服务的实时资源占用（服务运行中才有）。
+    pub fn get_metrics(&self, service_id: &str) -> Option<crate::metrics::ServiceMetrics> {
+        let job_handle = {
+            let instances = self.instances.lock().unwrap();
+            instances
+                .get(service_id)
+                .map(|inst| inst.job_handle)
+                .unwrap_or(0)
+        };
+        self.metrics_manager.query(service_id, job_handle)
     }
 }
 
@@ -1324,6 +1376,8 @@ mod tests {
             build_goal: None,
             skip_tests: false,
             main_class: None,
+            group: None,
+            health_check_url: None,
         }
     }
 
@@ -1587,6 +1641,8 @@ mod tests {
             build_goal: None,
             skip_tests: false,
             main_class: None,
+            group: None,
+            health_check_url: None,
         };
 
         // 1. 启动服务
@@ -1677,6 +1733,8 @@ mod tests {
             build_goal: None,
             skip_tests: false,
             main_class: None,
+            group: None,
+            health_check_url: None,
         };
 
         // 启动初始为 dev

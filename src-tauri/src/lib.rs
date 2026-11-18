@@ -1,8 +1,11 @@
 pub mod commands;
 pub mod config;
+pub mod health;
 pub mod logs;
 pub mod maven;
 pub mod maven_tasks;
+pub mod metrics;
+pub mod port;
 pub mod process;
 pub mod profiles;
 pub mod terminal;
@@ -11,8 +14,12 @@ use commands::AppState;
 use config::ConfigManager;
 use logs::LogManager;
 use maven_tasks::MavenTaskManager;
-use process::ProcessManager;
+use process::{ProcessManager, ServiceStatus};
 use std::sync::{Arc, Mutex};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Listener, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -33,6 +40,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::get_services,
@@ -54,7 +62,44 @@ pub fn run() {
             commands::detect_main_classes,
             commands::locate_built_jar,
             commands::open_service_terminal,
+            commands::get_service_health,
+            commands::get_service_metrics,
+            commands::export_services,
+            commands::import_services,
+            commands::clone_service,
         ])
+        .setup(|app| {
+            // 系统托盘：常驻状态菜单
+            let menu = build_tray_menu(app.handle())?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().expect("app icon required").clone())
+                .tooltip("Local Service Runner — Spring Boot 服务运行管理器")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+                .build(app)?;
+
+            // 服务状态变化 → 刷新托盘菜单 + 异常退出时发系统通知
+            let app_for_status = app.handle().clone();
+            app.listen_any("service-status-change", move |event| {
+                on_status_changed(&app_for_status, event.payload());
+            });
+
+            // 配置增删改（保存/删除/克隆/导入）→ 刷新托盘菜单
+            let app_for_config = app.handle().clone();
+            app.listen_any("services-changed", move |_event| {
+                refresh_tray(&app_for_config);
+            });
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关窗驻留：关闭按钮隐藏到托盘，进程治理与日志继续在后台运行
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |_app_handle, event| {
@@ -64,4 +109,130 @@ pub fn run() {
                 maven_task_manager.cleanup_all();
             }
         });
+}
+
+/// 托盘菜单中的服务状态标记字符。
+fn tray_status_char(status: &ServiceStatus) -> &'static str {
+    match status {
+        ServiceStatus::Running { .. } => "●",
+        ServiceStatus::Starting | ServiceStatus::Stopping => "◐",
+        ServiceStatus::Building { .. } => "⚙",
+        ServiceStatus::Failed { .. } => "✕",
+        ServiceStatus::Stopped => "○",
+    }
+}
+
+/// 构建托盘菜单：显示窗口 / 各服务（启动·停止） / 退出。
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let state = app.state::<AppState>();
+    let services = state.services.lock().unwrap().clone();
+
+    let mut builder = MenuBuilder::new(app).text("win-show", "显示主窗口").separator();
+
+    for svc in &services {
+        let status = state.process_manager.get_status(&svc.id);
+        let label = format!("{}  {}", tray_status_char(&status), svc.name);
+        let submenu = SubmenuBuilder::new(app, label)
+            .text(format!("svc-start:{}", svc.id), "启动")
+            .text(format!("svc-stop:{}", svc.id), "停止")
+            .build()?;
+        builder = builder.item(&submenu);
+    }
+
+    builder = builder.separator().text("app-exit", "退出应用");
+    builder.build()
+}
+
+/// 托盘菜单整体重建（服务数与状态都不多，整棵重建最简单可靠）。
+fn refresh_tray(app: &AppHandle) {
+    let Ok(menu) = build_tray_menu(app) else {
+        return;
+    };
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+/// 托盘菜单事件分发。
+fn handle_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "win-show" => {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+        "app-exit" => {
+            app.exit(0);
+        }
+        _ => {
+            if let Some(svc_id) = id.strip_prefix("svc-start:") {
+                let state = app.state::<AppState>();
+                let Some(svc) = state
+                    .services
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == svc_id)
+                    .cloned()
+                else {
+                    return;
+                };
+                // 正在跑 Maven 工具箱任务时不允许启动（与前端按钮一致）
+                if state.maven_task_manager.is_running(svc_id) {
+                    return;
+                }
+                let _ = state.process_manager.start_service(Some(app), &svc);
+            } else if let Some(svc_id) = id.strip_prefix("svc-stop:") {
+                let state = app.state::<AppState>();
+                let timeout = state
+                    .services
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == svc_id)
+                    .map(|s| s.stop_timeout_secs)
+                    .unwrap_or(5);
+                let _ = state.process_manager.stop_service(Some(app), svc_id, timeout);
+            }
+        }
+    }
+}
+
+/// 服务状态变化：刷新托盘 + 异常退出时发系统通知。
+fn on_status_changed(app: &AppHandle, payload: &str) {
+    refresh_tray(app);
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return;
+    };
+    if value["status"]["type"].as_str() != Some("failed") {
+        return;
+    }
+    let Some(service_id) = value["serviceId"].as_str() else {
+        return;
+    };
+
+    let state = app.state::<AppState>();
+    let name = state
+        .services
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.id == service_id)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| service_id.to_string());
+    let error = value["status"]["error"].as_str().unwrap_or_default();
+
+    let body = if error.is_empty() {
+        format!("服务「{}」异常退出", name)
+    } else {
+        format!("服务「{}」异常退出：{}", name, error)
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title("Local Service Runner")
+        .body(body)
+        .show();
 }
