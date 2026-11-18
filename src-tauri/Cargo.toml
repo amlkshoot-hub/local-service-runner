@@ -2,8 +2,8 @@
 name = "tauri-app"
 version = "1.0.0"
 description = "Local Service Runner — a Windows desktop manager for local Spring Boot services"
-authors = ["amlkshoot-hub"]
-repository = "https://github.com/amlkshoot-hub/local-service-runner"
+authors = ["amlkshoot-std"]
+repository = "https://github.com/amlkshoot-std/local-service-runner"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

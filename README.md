@@ -287,7 +287,7 @@ cargo build --release
 
 ## 参与与反馈
 
-- 仓库地址：<https://github.com/amlkshoot-hub/local-service-runner>
+- 仓库地址：<https://github.com/amlkshoot-std/local-service-runner>
 - 问题反馈与功能建议：欢迎提交 Issue 或 Pull Request
 - 提交前建议本地执行 `npm run build` 与 `cd src-tauri && cargo test --lib`，确保前端类型检查与后端测试通过
 
