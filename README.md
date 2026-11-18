@@ -183,7 +183,11 @@ cargo build --release
 | `test_detect_profiles_in_maven_module` | 验证启动模块下的 `application-{profile}.yml` 扫描 | ✅ PASS |
 | `test_detects_module_in_aggregator` | 验证聚合根下自动定位声明了插件的可启动子模块 | ✅ PASS |
 | `test_prefers_shallow_module_and_ignores_plugin_management` | 验证优先浅层模块且忽略 pluginManagement | ✅ PASS |
+| `test_root_with_plugin_needs_no_module` | 验证聚合根自身声明插件时无需 `-pl` 参数 | ✅ PASS |
+| `test_configured_module_is_validated` | 验证手动配置的模块必须真实存在 | ✅ PASS |
+| `test_non_maven_dir_is_reported` | 验证非 Maven 目录被正确识别 | ✅ PASS |
 | `test_maven_command_uses_detected_module` | 验证启动命令生成 `-pl <module> spring-boot:run` | ✅ PASS |
+| `test_maven_command_rejects_missing_module` | 验证缺失模块被拒绝并返回明确错误 | ✅ PASS |
 | `test_cmd_command_line_quotes_command_with_spaces` | 验证含空格路径的 cmd.exe 命令行引号处理 | ✅ PASS |
 | `test_decode_console_bytes_handles_gbk_and_utf8` | 验证 GBK / UTF-8 日志行解码与 ANSI 转义剥离 | ✅ PASS |
 | `test_service_status_serializes_camel_case_fields` | 验证服务状态 JSON 字段为 camelCase（activeProfiles / startedAt / exitCode） | ✅ PASS |
