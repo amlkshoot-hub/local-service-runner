@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows / macOS / Linux 协作时产生无意义 diff
+* text=auto
+
+*.rs   text eol=lf
+*.ts   text eol=lf
+*.vue  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+
+*.png  binary
+*.ico  binary
+*.icns binary
+*.jar  binary
