@@ -3,7 +3,7 @@
     <div class="modal-card">
       <div class="modal-header">
         <div class="modal-title">{{ isEdit ? '编辑服务配置' : '添加新服务' }}</div>
-        <button class="icon-btn close-btn" @click="close">✕</button>
+        <button class="icon-btn close-btn" @click="close"><AppIcon name="close" :size="15" /></button>
       </div>
 
       <div class="modal-body">
@@ -29,15 +29,17 @@
               placeholder="例如: D:\projects\user-service"
               @blur="onWorkDirBlur"
             />
-            <button class="btn secondary" @click="pickWorkDir" :disabled="picking">
-              {{ picking ? '选择中...' : '📂 选择目录' }}
+            <button class="btn ghost" @click="pickWorkDir" :disabled="picking">
+              <AppIcon name="folder" :size="13" />
+              {{ picking ? '选择中...' : '选择目录' }}
             </button>
             <button
-              class="btn secondary"
+              class="btn ghost"
               @click="scanProfiles"
               :disabled="scanning || !form.workDir.trim()"
             >
-              {{ scanning ? '扫描中...' : '🔍 识别 Profile' }}
+              <AppIcon name="search" :size="13" />
+              {{ scanning ? '扫描中...' : '识别 Profile' }}
             </button>
           </div>
           <div v-if="detectedProfiles.length > 0" class="detect-tip">
@@ -178,11 +180,12 @@
                 placeholder="留空自动定位，例如: ry-admin/target/ry-admin.jar"
               />
               <button
-                class="btn secondary"
+                class="btn ghost"
                 @click="locateJar"
                 :disabled="locatingJar || !form.workDir.trim()"
               >
-                {{ locatingJar ? '定位中...' : '📦 定位现有 JAR' }}
+                <AppIcon name="package" :size="13" />
+                {{ locatingJar ? '定位中...' : '定位现有 JAR' }}
               </button>
             </div>
             <div v-if="locatedJarMessage" class="module-hint">
@@ -216,7 +219,7 @@
                 @click="detectMainClasses"
                 :disabled="detectingMain || !form.workDir.trim()"
               >
-                {{ detectingMain ? '探测中...' : '🔍 探测主类' }}
+                {{ detectingMain ? '探测中...' : '探测主类' }}
               </button>
             </div>
             <div v-if="detectedMainClasses.length > 0" class="detect-tip">
@@ -224,9 +227,10 @@
                 v-for="m in detectedMainClasses"
                 :key="m.fqcn"
                 class="profile-tag"
+                :title="m.isSpringBootEntry ? 'Spring Boot 入口类' : '含 main 方法'"
                 @click="selectMainClass(m.fqcn)"
               >
-                + {{ m.fqcn }}{{ m.isSpringBootEntry ? ' ⭐' : '' }}
+                {{ m.fqcn }}{{ m.isSpringBootEntry ? ' ⭐' : '' }}
               </span>
             </div>
             <div v-if="detectedMainHint" class="module-hint">
@@ -301,7 +305,10 @@
         <!-- 高级折叠选项 -->
         <div class="collapsible">
           <div class="collapsible-header" @click="showAdvanced = !showAdvanced">
-            <span>{{ showAdvanced ? '▼ 收起高级设置' : '▶ 展开高级设置' }}</span>
+            <span class="collapsible-arrow" :class="{ expanded: showAdvanced }">
+              <AppIcon name="chevronDown" :size="13" />
+            </span>
+            <span>{{ showAdvanced ? '收起高级设置' : '展开高级设置' }}</span>
           </div>
           <div v-if="showAdvanced" class="collapsible-body">
             <div class="form-row">
@@ -343,6 +350,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import AppIcon from './AppIcon.vue';
 import type { MainClassCandidate, MavenProjectInfo, ServiceConfig } from '../types';
 
 const props = defineProps<{
@@ -706,161 +714,207 @@ function save() {
 </script>
 
 <style scoped>
+/* 毛玻璃遮罩 */
 .modal-backdrop {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background-color: rgba(0, 0, 0, 0.65);
+  inset: 0;
+  background: rgba(4, 7, 13, 0.62);
+  backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  backdrop-filter: blur(2px);
+  animation: backdrop-in 0.18s ease;
 }
 
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 模态卡片 */
 .modal-card {
-  width: 620px;
-  max-width: 90vw;
-  max-height: 85vh;
-  background-color: #21252b;
-  border: 1px solid #3e4451;
-  border-radius: 6px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  width: 640px;
+  max-width: 92vw;
+  max-height: 86vh;
+  background: var(--bg-card);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
   display: flex;
   flex-direction: column;
+  animation: modal-in 0.22s cubic-bezier(0.34, 1.3, 0.64, 1);
+  overflow: hidden;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .modal-header {
-  padding: 14px 18px;
-  border-bottom: 1px solid #2c313a;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line-1);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.06), transparent);
 }
 
 .modal-title {
   font-size: 15px;
-  font-weight: 600;
-  color: #d7dae0;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.2px;
 }
 
-.close-btn {
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
   background: none;
   border: none;
-  color: #abb2bf;
-  font-size: 16px;
+  color: var(--text-2);
   cursor: pointer;
-  padding: 4px;
+  transition: all 0.15s ease;
 }
-.close-btn:hover {
-  color: #e06c75;
+.icon-btn:hover {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--danger);
 }
 
 .modal-body {
-  padding: 16px 18px;
+  padding: 18px 20px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 
 .form-group label {
   font-size: 12px;
-  color: #abb2bf;
-  font-weight: 500;
+  color: var(--text-2);
+  font-weight: 600;
+  letter-spacing: 0.2px;
 }
 
 .required {
-  color: #e06c75;
+  color: var(--danger);
 }
 
+/* 输入控件统一 */
 .input-field {
-  background-color: #1b1d23;
-  border: 1px solid #3b4048;
-  color: #d7dae0;
-  padding: 7px 10px;
-  border-radius: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-2);
+  color: var(--text-1);
+  padding: 8px 12px;
+  border-radius: var(--r-md);
   font-size: 13px;
   outline: none;
+  font-family: inherit;
+  transition: all 0.18s ease;
+  width: 100%;
 }
 .input-field:focus {
-  border-color: #528bff;
+  border-color: var(--line-accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.13);
+}
+.input-field::placeholder {
+  color: var(--text-3);
 }
 
 .input-with-action {
   display: flex;
-  gap: 8px;
+  gap: 7px;
 }
 .input-with-action input {
   flex: 1;
 }
 
+/* 启动类型胶囊组 */
 .type-capsules {
   display: flex;
-  gap: 6px;
+  gap: 7px;
   flex-wrap: wrap;
-}
-
-.goal-capsules {
-  display: flex;
-  gap: 6px;
-}
-
-.goal-btn {
-  flex: 1;
-  padding: 6px 12px;
-  font-size: 12px;
-  font-family: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
-  border: 1px solid #3b4048;
-  background-color: #1b1d23;
-  color: #abb2bf;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.goal-btn.active {
-  background-color: #2c384e;
-  border-color: #528bff;
-  color: #ffffff;
-  font-weight: 500;
-}
-
-.hint-info {
-  color: #9cdcfe;
 }
 
 .capsule-btn {
   flex: 1 1 auto;
-  padding: 7px 10px;
+  padding: 8px 12px;
   font-size: 12px;
-  border: 1px solid #3b4048;
-  background-color: #1b1d23;
-  color: #abb2bf;
-  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-input);
+  color: var(--text-2);
+  border-radius: var(--r-md);
   cursor: pointer;
-  transition: all 0.15s ease;
+  font-family: inherit;
   white-space: nowrap;
+  transition: all 0.16s ease;
 }
-
+.capsule-btn:hover {
+  color: var(--text-1);
+  border-color: var(--line-accent);
+}
 .capsule-btn.active {
-  background-color: #2c384e;
-  border-color: #528bff;
-  color: #ffffff;
-  font-weight: 500;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.24), rgba(139, 92, 246, 0.16));
+  border-color: rgba(99, 102, 241, 0.55);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.25);
 }
 
+/* 构建目标胶囊 */
+.goal-capsules {
+  display: flex;
+  gap: 7px;
+}
+
+.goal-btn {
+  flex: 1;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--line-2);
+  background: var(--bg-input);
+  color: var(--text-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.goal-btn:hover {
+  color: var(--text-1);
+  border-color: var(--line-accent);
+}
+.goal-btn.active {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.24), rgba(139, 92, 246, 0.16));
+  border-color: rgba(99, 102, 241, 0.55);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 检测提示区 */
 .detect-tip {
   font-size: 11px;
-  color: #98c379;
+  color: var(--ok);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -869,51 +923,117 @@ function save() {
 }
 
 .profile-tag {
-  background-color: rgba(152, 195, 121, 0.15);
-  border: 1px solid rgba(152, 195, 121, 0.3);
-  padding: 2px 6px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  background: rgba(52, 211, 153, 0.09);
+  border: 1px solid rgba(52, 211, 153, 0.28);
+  color: #6ee7b7;
+  padding: 2px 9px;
+  border-radius: 20px;
   cursor: pointer;
+  font-family: var(--font-mono);
+  transition: all 0.15s ease;
 }
 .profile-tag:hover {
-  background-color: rgba(152, 195, 121, 0.3);
+  background: rgba(52, 211, 153, 0.18);
+  border-color: rgba(52, 211, 153, 0.5);
 }
 
+/* 模块/提示信息 */
 .module-hint {
   font-size: 11px;
   margin-top: 2px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .hint-ok {
-  color: #98c379;
+  color: var(--ok);
 }
 
 .hint-warn {
-  color: #e5c07b;
+  color: var(--warn);
 }
 
+.hint-info {
+  color: var(--info);
+}
+
+/* 复选行 */
 .checkbox-row label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   cursor: pointer;
+  font-weight: 500;
+  color: var(--text-1);
 }
 
-.collapsible {
-  border: 1px dashed #3e4451;
+/* 复选框自绘（通用） */
+input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
   border-radius: 4px;
-  padding: 8px 10px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-input);
+  cursor: pointer;
+  position: relative;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+input[type='checkbox']:hover {
+  border-color: var(--line-accent);
+}
+input[type='checkbox']:checked {
+  background: var(--accent-grad);
+  border-color: transparent;
+}
+input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1.5px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* 高级折叠 */
+.collapsible {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  transition: border-color 0.18s ease;
+}
+.collapsible:hover {
+  border-color: var(--line-accent);
 }
 
 .collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 12px;
-  color: #528bff;
+  color: var(--accent-soft);
   cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+
+.collapsible-arrow {
+  display: inline-flex;
+  align-items: center;
+  transition: transform 0.2s ease;
+}
+.collapsible-arrow.expanded {
+  transform: rotate(180deg);
 }
 
 .collapsible-body {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .form-row {
@@ -925,44 +1045,96 @@ function save() {
   flex: 1;
 }
 
+/* 错误横幅 */
 .error-banner {
-  background-color: rgba(224, 108, 117, 0.15);
-  border: 1px solid #e06c75;
-  color: #e06c75;
-  padding: 8px 12px;
-  border-radius: 4px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+  padding: 9px 13px;
+  border-radius: var(--r-md);
   font-size: 12px;
+  animation: shake 0.3s ease;
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
 }
 
 .modal-footer {
-  padding: 12px 18px;
-  border-top: 1px solid #2c313a;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line-1);
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  background: rgba(7, 11, 20, 0.4);
 }
 
+/* 按钮系统（与 App.vue 一致） */
 .btn {
-  padding: 6px 14px;
-  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 14px;
+  border-radius: var(--r-md);
   font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  border: none;
-  transition: opacity 0.15s;
+  color: var(--text-1);
+  background: transparent;
+  border: 1px solid transparent;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.btn:hover {
-  opacity: 0.9;
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 .btn.primary {
-  background-color: #528bff;
+  background: var(--accent-grad);
   color: #ffffff;
+  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.35);
+}
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.5);
 }
 .btn.secondary {
-  background-color: #353b45;
-  color: #d7dae0;
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  border-color: var(--line-2);
+}
+.btn.secondary:hover:not(:disabled) {
+  border-color: var(--line-accent);
+  background: #1e2c48;
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.ghost:hover:not(:disabled) {
+  color: var(--text-1);
+  background: rgba(148, 163, 184, 0.09);
+  border-color: var(--line-1);
+}
+
+/* select 下拉的选项在深色下需要显式声明背景 */
+select.input-field option,
+select.input-field optgroup {
+  background: var(--bg-card);
+  color: var(--text-1);
 }
 </style>

@@ -3,7 +3,7 @@
     <!-- 顶部应用栏 -->
     <header class="app-header">
       <div class="header-left">
-        <span class="app-logo">⚡</span>
+        <span class="app-logo"><AppIcon name="bolt" :size="17" :stroke-width="2.2" /></span>
         <span class="app-title">Local Service Runner</span>
         <span class="app-badge">Spring Boot 管理器</span>
       </div>
@@ -12,7 +12,8 @@
           共 {{ services.length }} 个服务，{{ runningCount }} 个运行中
         </span>
         <button class="btn primary add-btn" @click="openAddModal">
-          + 添加服务
+          <AppIcon name="plus" :size="14" />
+          添加服务
         </button>
       </div>
     </header>
@@ -22,10 +23,11 @@
       <!-- 左侧：服务列表 -->
       <aside class="services-sidebar">
         <div class="sidebar-search">
+          <span class="search-icon"><AppIcon name="search" :size="13" /></span>
           <input
             v-model="serviceSearch"
             type="text"
-            placeholder="🔍 过滤服务..."
+            placeholder="过滤服务..."
             class="search-input"
           />
         </div>
@@ -64,7 +66,7 @@
                 title="启动"
                 @click="startService(svc.id)"
               >
-                ▶
+                <AppIcon name="play" :size="13" />
               </button>
               <button
                 v-if="isRunning(svc.id) || isStarting(svc.id) || isBuilding(svc.id)"
@@ -72,7 +74,7 @@
                 title="停止"
                 @click="stopService(svc.id)"
               >
-                ■
+                <AppIcon name="stop" :size="12" />
               </button>
             </div>
           </div>
@@ -100,14 +102,19 @@
                   </span>
                 </div>
                 <div class="service-work-dir" :title="currentService.workDir">
-                  📁 {{ currentService.workDir }}
+                  <AppIcon name="folder" :size="12" />
+                  <span class="dir-text">{{ currentService.workDir }}</span>
                 </div>
               </div>
 
               <!-- 右侧编辑/删除 -->
               <div class="service-mgmt-btns">
-                <button class="btn secondary sm" @click="openEditModal">编辑配置</button>
-                <button class="btn danger sm" @click="confirmDeleteService">删除</button>
+                <button class="btn ghost sm" @click="openEditModal">
+                  <AppIcon name="edit" :size="12" /> 编辑
+                </button>
+                <button class="btn ghost danger-ghost sm" @click="confirmDeleteService">
+                  <AppIcon name="trash" :size="12" /> 删除
+                </button>
               </div>
             </div>
 
@@ -138,7 +145,7 @@
                     >
                       {{ p }}
                     </option>
-                    <option value="custom">✏ 自定义多配置...</option>
+                    <option value="custom">自定义多配置...</option>
                   </select>
                   <input
                     v-if="isCustomProfileInput"
@@ -167,7 +174,7 @@
                   "
                   @click="startCurrentService"
                 >
-                  <span class="btn-icon">▶</span> 启动
+                  <AppIcon name="play" :size="12" /> 启动
                 </button>
                 <button
                   class="btn danger action-btn"
@@ -178,30 +185,30 @@
                   "
                   @click="stopCurrentService"
                 >
-                  <span class="btn-icon">■</span> 停止
+                  <AppIcon name="stop" :size="11" /> 停止
                 </button>
                 <button
                   class="btn secondary action-btn"
                   :disabled="!isRunning(currentService.id) && !isBuilding(currentService.id)"
                   @click="restartCurrentService"
                 >
-                  <span class="btn-icon">↻</span> 重启
+                  <AppIcon name="restart" :size="13" /> 重启
                 </button>
               </div>
 
               <!-- Maven 工具箱 + 项目终端 -->
               <div class="maven-toolbox">
                 <button
-                  class="btn secondary action-btn terminal-btn"
+                  class="btn ghost action-btn terminal-btn"
                   title="在项目目录唤起终端（Windows Terminal / cmd）"
                   @click="openTerminal"
                 >
-                  <span class="btn-icon">>_</span> 终端
+                  <AppIcon name="terminal" :size="13" /> 终端
                 </button>
                 <template v-if="isMavenLaunchType">
                   <template v-if="!isMavenTaskRunning(currentService.id)">
                     <button
-                      class="btn secondary action-btn"
+                      class="btn ghost action-btn mvn-btn"
                       :disabled="!canRunMavenTask"
                       title="mvn clean：清理工程 target 目录"
                       @click="runMavenTask('clean')"
@@ -209,7 +216,7 @@
                       Clean
                     </button>
                     <button
-                      class="btn secondary action-btn"
+                      class="btn ghost action-btn mvn-btn"
                       :disabled="!canRunMavenTask"
                       title="mvn compile：增量编译工程"
                       @click="runMavenTask('compile')"
@@ -217,7 +224,7 @@
                       Compile
                     </button>
                     <button
-                      class="btn secondary action-btn"
+                      class="btn ghost action-btn mvn-btn"
                       :disabled="!canRunMavenTask"
                       title="mvn package：打包全工程（不运行服务）"
                       @click="runMavenTask('package')"
@@ -225,7 +232,7 @@
                       Package
                     </button>
                     <button
-                      class="btn secondary action-btn"
+                      class="btn ghost action-btn mvn-btn"
                       :disabled="!canRunMavenTask"
                       title="mvn install：构建并安装到本地仓库"
                       @click="runMavenTask('install')"
@@ -235,10 +242,11 @@
                   </template>
                   <template v-else>
                     <span class="task-badge running">
+                      <span class="spinner"></span>
                       mvn {{ getMavenTaskGoal(currentService.id) }} 构建中...
                     </span>
                     <button class="btn danger action-btn" @click="stopMavenTask">
-                      停止构建
+                      <AppIcon name="stop" :size="11" /> 停止构建
                     </button>
                   </template>
                 </template>
@@ -261,22 +269,29 @@
           <div class="console-section">
             <div class="console-toolbar">
               <div class="toolbar-left">
-                <span class="console-title">实时控制台 (Console)</span>
+                <span class="console-title"><AppIcon name="terminal" :size="13" /> 实时控制台</span>
                 <span class="log-count">{{ filteredLogs.length }} 行</span>
               </div>
               <div class="toolbar-right">
-                <input
-                  v-model="logFilter"
-                  type="text"
-                  placeholder="过滤日志 (支持文本过滤)..."
-                  class="log-filter-input"
-                />
+                <div class="log-filter-wrap">
+                  <span class="log-filter-icon"><AppIcon name="filter" :size="12" /></span>
+                  <input
+                    v-model="logFilter"
+                    type="text"
+                    placeholder="过滤日志..."
+                    class="log-filter-input"
+                  />
+                </div>
                 <label class="auto-scroll-label">
+                  <span class="checkbox-fake"><AppIcon name="check" :size="10" :stroke-width="3" /></span>
                   <input type="checkbox" v-model="autoScroll" />
                   自动滚屏
                 </label>
-                <button class="btn secondary sm" @click="clearLogs">清空</button>
-                <button class="btn secondary sm" @click="copyLogs">
+                <button class="btn ghost sm" @click="clearLogs">
+                  <AppIcon name="trash" :size="12" /> 清空
+                </button>
+                <button class="btn ghost sm" @click="copyLogs">
+                  <AppIcon name="copy" :size="12" />
                   {{ copyTip || '复制全部' }}
                 </button>
               </div>
@@ -301,6 +316,7 @@
         </div>
 
         <div v-else class="empty-state">
+          <AppIcon name="layers" :size="34" :stroke-width="1.3" class="empty-icon" />
           <div class="empty-title">请在左侧选择一个服务，或添加新服务</div>
         </div>
       </main>
@@ -321,6 +337,7 @@ import { ref, computed, onMounted, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import ServiceModal from './components/ServiceModal.vue';
+import AppIcon from './components/AppIcon.vue';
 import type {
   MavenProjectInfo,
   MavenTaskStatus,
@@ -824,176 +841,289 @@ function formatLevel(level: string) {
 </script>
 
 <style>
-/* 全局重置与深色主题 */
+/* ============ 设计令牌（全局共享，ServiceModal 同样使用） ============ */
+:root {
+  /* 深空蓝黑底色系 */
+  --bg-deep: #070b14;
+  --bg-base: #0b1120;
+  --bg-panel: #0e1626;
+  --bg-card: #131d30;
+  --bg-elevated: #1a2740;
+  --bg-input: #0b1424;
+  --bg-console: #080d18;
+
+  /* 靛紫强调 */
+  --accent: #6366f1;
+  --accent-soft: #a5b4fc;
+  --accent-grad: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+
+  /* 状态色 */
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --info: #60a5fa;
+
+  /* 文本层次 */
+  --text-1: #e6edf6;
+  --text-2: #98a6bd;
+  --text-3: #5f6e85;
+
+  /* 边框层次 */
+  --line-1: rgba(148, 163, 184, 0.1);
+  --line-2: rgba(148, 163, 184, 0.18);
+  --line-accent: rgba(99, 102, 241, 0.45);
+
+  /* 圆角 */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 14px;
+
+  --shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-body,
-html {
+html,
+body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  background-color: #1e1e1e;
-  color: #d4d4d4;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+  background: var(--bg-deep);
+  color: var(--text-1);
   user-select: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 #app {
   width: 100vw;
   height: 100vh;
 }
+
+/* 全局细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 </style>
 
 <style scoped>
+/* ============ 布局骨架 ============ */
 .app-container {
   display: flex;
   flex-direction: column;
   width: 100vw;
   height: 100vh;
-  background-color: #1e1e1e;
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgba(99, 102, 241, 0.09), transparent 60%),
+    radial-gradient(900px 420px at -10% 110%, rgba(139, 92, 246, 0.07), transparent 60%),
+    var(--bg-base);
 }
 
-/* 顶部导航 */
-.app-header {
-  height: 42px;
-  background-color: #252526;
-  border-bottom: 1px solid #333333;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  flex-shrink: 0;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.app-logo {
-  font-size: 16px;
-}
-
-.app-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #cccccc;
-}
-
-.app-badge {
-  font-size: 11px;
-  background-color: #333333;
-  color: #858585;
-  padding: 2px 6px;
-  border-radius: 3px;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.stat-text {
-  font-size: 12px;
-  color: #858585;
-}
-
-.add-btn {
-  font-weight: 500;
-}
-
-/* 主工作区 */
 .app-workspace {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-/* 左侧边栏 */
+/* ============ 顶部应用栏（毛玻璃） ============ */
+.app-header {
+  height: 48px;
+  background: rgba(14, 22, 38, 0.72);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--line-1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-md);
+  background: var(--accent-grad);
+  color: #fff;
+  box-shadow: 0 2px 14px rgba(99, 102, 241, 0.45);
+}
+
+.app-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: linear-gradient(90deg, #e6edf6 20%, var(--accent-soft));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.app-badge {
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--line-1);
+  padding: 2px 8px;
+  border-radius: 20px;
+  letter-spacing: 0.3px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.stat-text {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* ============ 左侧服务列表 ============ */
 .services-sidebar {
-  width: 270px;
-  background-color: #252526;
-  border-right: 1px solid #333333;
+  width: 282px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line-1);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
 }
 
 .sidebar-search {
-  padding: 8px 10px;
-  border-bottom: 1px solid #2d2d2d;
+  padding: 12px 14px 10px;
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  left: 26px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  display: inline-flex;
+  pointer-events: none;
 }
 
 .search-input {
   width: 100%;
-  background-color: #3c3c3c;
-  border: 1px solid #3c3c3c;
-  color: #cccccc;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  color: var(--text-1);
   font-size: 12px;
-  padding: 5px 8px;
-  border-radius: 3px;
+  padding: 8px 10px 8px 32px;
+  border-radius: var(--r-md);
   outline: none;
+  transition: all 0.18s ease;
+  font-family: inherit;
 }
 .search-input:focus {
-  border-color: #007acc;
+  border-color: var(--line-accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 .services-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 4px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
+/* 服务卡片 */
 .service-item {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
   gap: 10px;
+  padding: 10px 12px;
   cursor: pointer;
-  border-left: 3px solid transparent;
-  transition: background-color 0.1s;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  position: relative;
+  transition: all 0.16s ease;
 }
-
 .service-item:hover {
-  background-color: #2a2d2e;
+  background: rgba(148, 163, 184, 0.06);
+  border-color: var(--line-1);
 }
-
 .service-item.active {
-  background-color: #37373d;
-  border-left-color: #007acc;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.16), rgba(139, 92, 246, 0.05));
+  border-color: rgba(99, 102, 241, 0.32);
+}
+.service-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-grad);
 }
 
+/* 状态点 */
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  background: var(--text-3);
 }
-
-.status-dot.running {
-  background-color: #89d185;
-  box-shadow: 0 0 6px #89d185;
-}
-
 .status-dot.starting,
 .status-dot.stopping {
-  background-color: #cca700;
-  box-shadow: 0 0 5px #cca700;
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.6);
+  animation: pulse-dot 2.4s ease-in-out infinite;
 }
-
 .status-dot.stopped {
-  background-color: #6e7681;
+  background: #475569;
+}
+.status-dot.failed {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.55);
+}
+.status-dot.running {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.65);
+  animation: pulse-dot 2s ease-in-out infinite;
 }
 
-.status-dot.failed {
-  background-color: #f14c4c;
-  box-shadow: 0 0 6px #f14c4c;
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .service-meta {
@@ -1009,91 +1139,102 @@ html {
 
 .service-name {
   font-size: 13px;
-  font-weight: 500;
-  color: #cccccc;
+  font-weight: 600;
+  color: var(--text-1);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .service-port {
-  font-size: 11px;
-  color: #4ec9b0;
-  background-color: rgba(78, 201, 176, 0.12);
-  padding: 1px 4px;
-  border-radius: 3px;
+  font-size: 10.5px;
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  padding: 0 5px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
 }
 
 .service-sub-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .type-tag {
   font-size: 10px;
-  color: #858585;
-  background-color: #333333;
-  padding: 0 4px;
-  border-radius: 2px;
+  color: var(--text-2);
+  background: rgba(148, 163, 184, 0.1);
+  padding: 1px 6px;
+  border-radius: 5px;
+  white-space: nowrap;
 }
 
 .profile-preview {
-  font-size: 11px;
-  color: #6a9955;
+  font-size: 10.5px;
+  color: var(--accent-soft);
+  font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* 悬浮快捷操作 */
 .service-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   transition: opacity 0.15s;
 }
-
-.service-item:hover .service-actions {
+.service-item:hover .service-actions,
+.service-item.active .service-actions {
   opacity: 1;
 }
 
 .action-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   background: none;
-  border: none;
-  font-size: 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
   cursor: pointer;
-  padding: 2px 5px;
-  border-radius: 3px;
+  transition: all 0.15s ease;
 }
 
 .start-icon {
-  color: #89d185;
+  color: var(--ok);
 }
 .start-icon:hover {
-  background-color: rgba(137, 209, 133, 0.2);
+  background: rgba(52, 211, 153, 0.14);
+  border-color: rgba(52, 211, 153, 0.3);
 }
 
 .stop-icon {
-  color: #f14c4c;
+  color: var(--danger);
 }
 .stop-icon:hover {
-  background-color: rgba(241, 76, 76, 0.2);
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.3);
 }
 
 .empty-list-tip {
-  padding: 20px 14px;
+  padding: 28px 16px;
   font-size: 12px;
-  color: #6e7681;
+  color: var(--text-3);
   text-align: center;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
-/* 右侧主面板 */
+/* ============ 右侧主面板 ============ */
 .main-panel {
   flex: 1;
-  background-color: #1e1e1e;
+  background: transparent;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1108,12 +1249,12 @@ html {
 
 /* 控制头部 */
 .control-header {
-  background-color: #252526;
-  border-bottom: 1px solid #333333;
-  padding: 12px 18px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line-1);
+  padding: 16px 20px 13px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   flex-shrink: 0;
 }
 
@@ -1121,36 +1262,49 @@ html {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 12px;
 }
 
 .title-section {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 5px;
+  min-width: 0;
 }
 
 .service-main-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #e0e0e0;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-1);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  letter-spacing: 0.2px;
 }
 
 .type-pill {
-  font-size: 11px;
-  font-weight: normal;
-  background-color: #333333;
-  color: #9cdcfe;
-  padding: 2px 7px;
-  border-radius: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.14);
+  color: var(--accent-soft);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  padding: 2px 9px;
+  border-radius: 20px;
+  white-space: nowrap;
 }
 
 .service-work-dir {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: #858585;
-  max-width: 600px;
+  color: var(--text-3);
+  max-width: 640px;
+}
+.service-work-dir .app-icon {
+  flex-shrink: 0;
+}
+.dir-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1159,88 +1313,95 @@ html {
 .service-mgmt-btns {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .control-header-bottom {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   flex-wrap: wrap;
-  padding-top: 4px;
+  padding-top: 2px;
 }
 
+/* Profile 区 */
 .profile-box {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
 }
 
 .box-label {
-  font-size: 12px;
-  color: #858585;
+  font-size: 11.5px;
+  color: var(--text-3);
 }
 
 .active-profile-badge {
-  font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 3px;
-  background-color: #333333;
-  color: #858585;
-  font-weight: 500;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-2);
+  font-weight: 600;
+  border: 1px solid var(--line-1);
 }
-
 .active-profile-badge.running {
-  background-color: rgba(137, 209, 133, 0.15);
-  color: #89d185;
-  border: 1px solid rgba(137, 209, 133, 0.35);
-}
-
-.next-profile-box {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--ok);
+  border-color: rgba(52, 211, 153, 0.35);
 }
 
 .profile-selector-wrap {
   display: flex;
-  gap: 4px;
+  gap: 5px;
 }
 
 .profile-select {
-  background-color: #3c3c3c;
-  border: 1px solid #3c3c3c;
-  color: #cccccc;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  color: var(--text-1);
   font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 3px;
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
   outline: none;
+  font-family: inherit;
+  transition: all 0.18s ease;
 }
 .profile-select:focus {
-  border-color: #007acc;
+  border-color: var(--line-accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 .profile-custom-input {
-  background-color: #3c3c3c;
-  border: 1px solid #3c3c3c;
-  color: #cccccc;
+  background: var(--bg-input);
+  border: 1px solid var(--line-accent);
+  color: var(--text-1);
   font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 3px;
-  width: 100px;
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
+  width: 110px;
   outline: none;
+  font-family: var(--font-mono);
 }
 .profile-custom-input:focus {
-  border-color: #007acc;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
 }
 
 .profile-notice {
-  font-size: 11px;
-  color: #858585;
+  font-size: 10.5px;
+  color: var(--text-3);
 }
 
+/* 操作按钮组 */
 .action-btn-group {
   display: flex;
-  gap: 6px;
+  gap: 7px;
+}
+
+.action-btn {
+  padding: 6px 14px;
+  font-size: 12px;
 }
 
 /* Maven 工具箱 */
@@ -1248,237 +1409,377 @@ html {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-left: 12px;
-  border-left: 1px solid #3c3c3c;
+  padding-left: 14px;
+  border-left: 1px solid var(--line-1);
 }
 
+.mvn-btn {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 6px 11px;
+}
+
+/* 构建中 spinner */
+.spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(251, 191, 36, 0.25);
+  border-top-color: var(--warn);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 任务徽章 */
 .task-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
-  padding: 2px 7px;
-  border-radius: 3px;
+  padding: 3px 10px;
+  border-radius: 20px;
   white-space: nowrap;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .task-badge.running {
-  background-color: rgba(204, 167, 0, 0.15);
-  color: #cca700;
-  border: 1px solid rgba(204, 167, 0, 0.35);
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--warn);
+  border: 1px solid rgba(251, 191, 36, 0.3);
 }
 
 .task-badge.ok {
-  background-color: rgba(137, 209, 133, 0.15);
-  color: #89d185;
-  border: 1px solid rgba(137, 209, 133, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--ok);
+  border: 1px solid rgba(52, 211, 153, 0.3);
 }
 
 .task-badge.err {
-  background-color: rgba(241, 76, 76, 0.15);
-  color: #f14c4c;
-  border: 1px solid rgba(241, 76, 76, 0.35);
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(248, 113, 113, 0.3);
 }
 
-.action-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 12px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.btn-icon {
-  font-size: 11px;
-}
-
+/* 状态摘要 */
 .status-summary {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   margin-left: auto;
 }
 
 .state-label {
   font-size: 12px;
-  color: #cccccc;
+  color: var(--text-2);
+  white-space: nowrap;
 }
 
 .pid-tag {
-  font-size: 11px;
-  background-color: #333333;
-  color: #4ec9b0;
-  padding: 2px 6px;
-  border-radius: 3px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  color: var(--info);
+  padding: 2px 8px;
+  border-radius: 20px;
 }
 
-/* 控制台日志区 */
+/* ============ 日志控制台 ============ */
 .console-section {
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background-color: #181a1f;
+  background: var(--bg-console);
 }
 
 .console-toolbar {
-  height: 34px;
-  background-color: #21252b;
-  border-bottom: 1px solid #282c34;
+  height: 38px;
+  background: rgba(14, 22, 38, 0.6);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line-1);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: 0 16px;
   flex-shrink: 0;
 }
 
 .toolbar-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .console-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-size: 12px;
-  font-weight: 500;
-  color: #abb2bf;
+  font-weight: 600;
+  color: var(--text-1);
 }
 
 .log-count {
-  font-size: 11px;
-  color: #5c6370;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
 }
 
 .toolbar-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+}
+
+.log-filter-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.log-filter-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-3);
+  display: inline-flex;
+  pointer-events: none;
 }
 
 .log-filter-input {
-  background-color: #1b1d23;
-  border: 1px solid #3b4048;
-  color: #abb2bf;
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 3px;
-  width: 170px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  color: var(--text-1);
+  font-size: 11.5px;
+  padding: 4px 9px 4px 28px;
+  border-radius: var(--r-sm);
+  width: 180px;
   outline: none;
+  transition: all 0.18s ease;
+  font-family: inherit;
 }
 .log-filter-input:focus {
-  border-color: #528bff;
+  border-color: var(--line-accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  width: 220px;
 }
 
 .auto-scroll-label {
-  font-size: 11px;
-  color: #abb2bf;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
   cursor: pointer;
 }
+.auto-scroll-label input {
+  display: none;
+}
 
+/* 自绘复选框（:has 匹配选中态） */
+.checkbox-fake {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-input);
+  color: transparent;
+  transition: all 0.15s ease;
+}
+.auto-scroll-label:has(input:checked) .checkbox-fake {
+  background: var(--accent-grad);
+  border-color: transparent;
+  color: #fff;
+}
+
+/* 终端日志内容 */
 .terminal-container {
   flex: 1;
   overflow-y: auto;
-  padding: 10px 14px;
-  font-family: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
+  padding: 12px 16px;
+  font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.65;
   user-select: text;
 }
 
 .log-row {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   word-break: break-all;
+  padding: 1px 0;
 }
 
 .log-time {
-  color: #5c6370;
+  color: var(--text-3);
   flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.75;
+  padding-top: 1px;
 }
 
 .log-level {
   flex-shrink: 0;
-  font-size: 10px;
-  padding: 0 4px;
-  border-radius: 2px;
-  font-weight: 600;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  margin-top: 1px;
+  font-family: inherit;
 }
-
 .log-level.INFO {
-  color: #61afef;
+  color: #93c5fd;
+  background: rgba(96, 165, 250, 0.13);
 }
 .log-level.WARN {
-  color: #e5c07b;
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.13);
 }
 .log-level.ERROR {
-  color: #e06c75;
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.15);
 }
 .log-level.DEBUG {
-  color: #98c379;
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.1);
 }
 .log-level.DEFAULT {
-  color: #abb2bf;
+  color: var(--text-2);
+  background: rgba(148, 163, 184, 0.09);
+}
+.log-level.SYSTEM {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.13);
 }
 
 .log-content {
   flex: 1;
   white-space: pre-wrap;
-  color: #abb2bf;
+  color: #a8b6cc;
 }
 
 .level-error .log-content {
-  color: #e06c75;
+  color: #f87171;
 }
-
 .level-warn .log-content {
-  color: #e5c07b;
+  color: #fbbf24;
 }
 
 .empty-log-tip,
 .empty-state {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 14px;
   height: 100%;
-  color: #5c6370;
+  color: var(--text-3);
   font-size: 13px;
 }
 
-/* 按钮基础 */
+.empty-log-tip {
+  padding: 40px 0;
+}
+
+.empty-state .empty-icon {
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+.empty-title {
+  letter-spacing: 0.3px;
+}
+
+/* ============ 按钮系统 ============ */
 .btn {
-  padding: 5px 12px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: var(--r-md);
   font-size: 12px;
-  border: none;
+  font-weight: 500;
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: opacity 0.15s;
+  color: var(--text-1);
+  background: transparent;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.btn:hover {
-  opacity: 0.9;
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
+
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
 .btn.primary {
-  background-color: #0e639c;
+  background: var(--accent-grad);
   color: #ffffff;
+  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.35);
 }
-.btn.secondary {
-  background-color: #3a3d41;
-  color: #cccccc;
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.5);
 }
+
 .btn.danger {
-  background-color: #a1260d;
-  color: #ffffff;
+  background: rgba(248, 113, 113, 0.13);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.btn.danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.22);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.btn.secondary {
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  border-color: var(--line-2);
+}
+.btn.secondary:hover:not(:disabled) {
+  border-color: var(--line-accent);
+  background: #1e2c48;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.ghost:hover:not(:disabled) {
+  color: var(--text-1);
+  background: rgba(148, 163, 184, 0.09);
+  border-color: var(--line-1);
+}
+
+.btn.danger-ghost:hover:not(:disabled) {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.25);
 }
 
 .btn.sm {
-  padding: 3px 8px;
+  padding: 4px 10px;
   font-size: 11px;
+}
+
+.add-btn {
+  font-weight: 600;
 }
 </style>
