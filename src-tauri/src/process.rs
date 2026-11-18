@@ -1110,9 +1110,9 @@ mod tests {
         let service = ServiceConfig {
             id: "test-svc-1".to_string(),
             name: "Test Spring Service".to_string(),
-            work_dir: fixture_dir.to_string(),
+            work_dir: fixture_dir.to_string_lossy().into_owned(),
             launch_type: LaunchType::Jar,
-            jar_path: Some(jar_path),
+            jar_path: Some(jar_path.to_string_lossy().into_owned()),
             custom_program: None,
             args: Vec::new(),
             env_vars: HashMap::new(),
@@ -1197,9 +1197,9 @@ mod tests {
         let mut service = ServiceConfig {
             id: "test-restart-svc".to_string(),
             name: "Test Restart Service".to_string(),
-            work_dir: fixture_dir.to_string(),
+            work_dir: fixture_dir.to_string_lossy().into_owned(),
             launch_type: LaunchType::Jar,
-            jar_path: Some(jar_path),
+            jar_path: Some(jar_path.to_string_lossy().into_owned()),
             custom_program: None,
             args: Vec::new(),
             env_vars: HashMap::new(),
