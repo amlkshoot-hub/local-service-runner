@@ -1,8 +1,10 @@
 use crate::config::{ConfigManager, ServiceConfig};
 use crate::logs::{LogEntry, LogManager};
-use crate::maven::{self, MavenProjectInfo};
+use crate::maven::{self, MainClassCandidate, MavenProjectInfo};
+use crate::maven_tasks::{MavenTaskManager, MavenTaskStatus};
 use crate::process::{ProcessManager, ServiceStatus};
 use crate::profiles;
+use crate::terminal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
@@ -12,6 +14,7 @@ pub struct AppState {
     pub config_manager: ConfigManager,
     pub process_manager: ProcessManager,
     pub log_manager: LogManager,
+    pub maven_task_manager: MavenTaskManager,
     pub services: Arc<Mutex<Vec<ServiceConfig>>>,
 }
 
@@ -117,6 +120,11 @@ pub fn start_service(app: AppHandle, state: State<'_, AppState>, id: String) -> 
         .clone();
     drop(services);
 
+    // 服务启动与 Maven 工具箱任务互斥：避免构建替换 JAR 时与服务进程冲突
+    if state.maven_task_manager.is_running(&id) {
+        return Err("该服务的 Maven 构建任务正在进行中，请等待完成或先停止任务".to_string());
+    }
+
     state.process_manager.start_service(Some(&app), &config)
 }
 
@@ -147,6 +155,10 @@ pub fn restart_service(
         .clone();
     drop(services);
 
+    if state.maven_task_manager.is_running(&id) {
+        return Err("该服务的 Maven 构建任务正在进行中，请等待完成或先停止任务".to_string());
+    }
+
     state.process_manager.restart_service(Some(&app), &config)
 }
 
@@ -168,4 +180,93 @@ pub fn get_service_logs(state: State<'_, AppState>, id: String) -> Vec<LogEntry>
 #[tauri::command]
 pub fn clear_service_logs(state: State<'_, AppState>, id: String) {
     state.log_manager.clear_logs(&id);
+}
+
+// ---------------- Maven 工具箱（clean / compile / package / install） ----------------
+
+/// 对服务所在工程执行一次 Maven 构建（输出进该服务的日志视窗，可中断）。
+#[tauri::command]
+pub fn run_maven_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    goal: String,
+) -> Result<(), String> {
+    let services = state.services.lock().unwrap();
+    let config = services
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "Service not found".to_string())?
+        .clone();
+    drop(services);
+
+    // 与服务运行状态互斥：Windows 下运行中的 JAR 会被进程锁定，mvn clean 会直接失败
+    match state.process_manager.get_status(&id) {
+        ServiceStatus::Stopped | ServiceStatus::Failed { .. } => {}
+        _ => {
+            return Err(
+                "服务正在运行或启停中，无法执行 Maven 构建（运行中的 JAR 被进程锁定），请先停止服务".to_string(),
+            );
+        }
+    }
+
+    state
+        .maven_task_manager
+        .run_task(Some(&app), &id, &config.work_dir, &goal)
+}
+
+/// 中断正在执行的 Maven 构建任务（内核级终结 Maven 进程树）。
+#[tauri::command]
+pub fn stop_maven_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.maven_task_manager.stop_task(Some(&app), &id)
+}
+
+#[tauri::command]
+pub fn get_maven_task_status(state: State<'_, AppState>, id: String) -> MavenTaskStatus {
+    state.maven_task_manager.get_status(&id)
+}
+
+// ---------------- 源码主类探测 / 构建产物定位 ----------------
+
+/// 扫描工程源码中的可执行主类（@SpringBootApplication 优先）。
+#[tauri::command]
+pub fn detect_main_classes(work_dir: String, module: String) -> Vec<MainClassCandidate> {
+    let module = if module.trim().is_empty() {
+        None
+    } else {
+        Some(module.as_str())
+    };
+    maven::detect_main_classes(&work_dir, module)
+}
+
+/// 定位工程（优先启动模块）target 下最新的可运行 JAR 产物，供前端展示与手动确认。
+#[tauri::command]
+pub fn locate_built_jar(work_dir: String, module: String) -> Result<Option<String>, String> {
+    let module = if module.trim().is_empty() {
+        None
+    } else {
+        Some(module.as_str())
+    };
+    maven::locate_built_jar(&work_dir, module)
+}
+
+// ---------------- 项目终端 ----------------
+
+/// 在服务工作目录唤起系统终端（Windows Terminal 优先，cmd 回退）。
+/// 终端独立于本应用生命周期：关闭 Runner 不会关闭终端。
+#[tauri::command]
+pub fn open_service_terminal(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let services = state.services.lock().unwrap();
+    let work_dir = services
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.work_dir.clone())
+        .ok_or_else(|| "Service not found".to_string())?;
+    drop(services);
+
+    terminal::open_terminal_at(&work_dir)
 }

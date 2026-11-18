@@ -73,6 +73,20 @@
             </button>
             <button
               type="button"
+              :class="['capsule-btn', { active: form.launchType === 'maven-build-jar' }]"
+              @click="form.launchType = 'maven-build-jar'"
+            >
+              构建+JAR 运行
+            </button>
+            <button
+              type="button"
+              :class="['capsule-btn', { active: form.launchType === 'source-main-class' }]"
+              @click="form.launchType = 'source-main-class'"
+            >
+              源码主类直启
+            </button>
+            <button
+              type="button"
               :class="['capsule-btn', { active: form.launchType === 'gradle-wrapper' }]"
               @click="form.launchType = 'gradle-wrapper'"
             >
@@ -88,8 +102,11 @@
           </div>
         </div>
 
-        <!-- Maven 多模块：启动模块选择 -->
-        <div v-if="form.launchType === 'maven-wrapper'" class="form-group">
+        <!-- Maven 多模块：启动模块选择（Maven 系启动方式共用） -->
+        <div
+          v-if="isMavenBasedLaunch"
+          class="form-group"
+        >
           <label>Maven 启动模块 (多模块工程必选)</label>
           <select v-model="form.mavenModule" class="input-field">
             <option value="">自动检测（推荐）</option>
@@ -109,8 +126,112 @@
               </template>
             </span>
             <span v-else class="hint-warn">
-              ⚠ 工程中未找到 spring-boot-maven-plugin，无法以 Maven 方式启动
+              ⚠ 工程中未找到 spring-boot-maven-plugin
             </span>
+          </div>
+          <div v-if="form.launchType === 'maven-build-jar'" class="module-hint">
+            <span class="hint-info">
+              ℹ 构建时对整个工程执行（不带 -pl）；模块仅用于定位构建产物 JAR 与 Profile 扫描
+            </span>
+          </div>
+        </div>
+
+        <!-- 构建+JAR 运行模式专有 -->
+        <div v-if="form.launchType === 'maven-build-jar'" class="type-fields">
+          <div class="form-group">
+            <label>构建目标</label>
+            <div class="goal-capsules">
+              <button
+                type="button"
+                :class="['goal-btn', { active: buildGoalValue === 'package' }]"
+                @click="form.buildGoal = 'package'"
+              >
+                mvn package
+              </button>
+              <button
+                type="button"
+                :class="['goal-btn', { active: buildGoalValue === 'install' }]"
+                @click="form.buildGoal = 'install'"
+              >
+                mvn install
+              </button>
+            </div>
+            <div class="module-hint">
+              <span class="hint-info">
+                多模块工程建议选 install：跨模块依赖会同步进入本地仓库，避免启动时找不到依赖
+              </span>
+            </div>
+          </div>
+          <div class="form-group checkbox-row">
+            <label>
+              <input type="checkbox" v-model="form.skipTests" />
+              构建时跳过测试 (-DskipTests，推荐)
+            </label>
+          </div>
+          <div class="form-group">
+            <label>JAR 文件路径 (留空则构建后自动定位模块 target 下最新产物)</label>
+            <div class="input-with-action">
+              <input
+                v-model="form.jarPath"
+                type="text"
+                class="input-field"
+                placeholder="留空自动定位，例如: ry-admin/target/ry-admin.jar"
+              />
+              <button
+                class="btn secondary"
+                @click="locateJar"
+                :disabled="locatingJar || !form.workDir.trim()"
+              >
+                {{ locatingJar ? '定位中...' : '📦 定位现有 JAR' }}
+              </button>
+            </div>
+            <div v-if="locatedJarMessage" class="module-hint">
+              <span :class="locatedJarFound ? 'hint-ok' : 'hint-warn'">{{ locatedJarMessage }}</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Java 可执行文件路径 (留空默认使用系统 PATH 中的 java)</label>
+            <input
+              v-model="form.javaPath"
+              type="text"
+              class="input-field"
+              placeholder="例如: C:\Program Files\Java\jdk-17\bin\java.exe"
+            />
+          </div>
+        </div>
+
+        <!-- 源码主类直启模式专有 -->
+        <div v-if="form.launchType === 'source-main-class'" class="type-fields">
+          <div class="form-group">
+            <label>启动主类 (全限定名) <span class="required">*</span></label>
+            <div class="input-with-action">
+              <input
+                v-model="form.mainClass"
+                type="text"
+                class="input-field"
+                placeholder="例如: com.ruoyi.RuoYiApplication"
+              />
+              <button
+                class="btn secondary"
+                @click="detectMainClasses"
+                :disabled="detectingMain || !form.workDir.trim()"
+              >
+                {{ detectingMain ? '探测中...' : '🔍 探测主类' }}
+              </button>
+            </div>
+            <div v-if="detectedMainClasses.length > 0" class="detect-tip">
+              <span
+                v-for="m in detectedMainClasses"
+                :key="m.fqcn"
+                class="profile-tag"
+                @click="selectMainClass(m.fqcn)"
+              >
+                + {{ m.fqcn }}{{ m.isSpringBootEntry ? ' ⭐' : '' }}
+              </span>
+            </div>
+            <div v-if="detectedMainHint" class="module-hint">
+              <span class="hint-warn">{{ detectedMainHint }}</span>
+            </div>
           </div>
         </div>
 
@@ -222,7 +343,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import type { MavenProjectInfo, ServiceConfig } from '../types';
+import type { MainClassCandidate, MavenProjectInfo, ServiceConfig } from '../types';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -248,6 +369,14 @@ const errorMessage = ref('');
 const argsString = ref('');
 const profilesString = ref('dev');
 
+// 构建+JAR 运行 / 源码主类直启的辅助状态
+const locatingJar = ref(false);
+const locatedJarMessage = ref('');
+const locatedJarFound = ref(false);
+const detectingMain = ref(false);
+const detectedMainClasses = ref<MainClassCandidate[]>([]);
+const detectedMainHint = ref('');
+
 const form = ref<ServiceConfig>({
   id: '',
   name: '',
@@ -263,6 +392,18 @@ const form = ref<ServiceConfig>({
   mavenModule: '',
   stopTimeoutSecs: 10,
   injectProfileCustom: false,
+  buildGoal: 'package',
+  skipTests: true,
+  mainClass: '',
+});
+
+const isMavenBasedLaunch = computed(() =>
+  ['maven-wrapper', 'maven-build-jar', 'source-main-class'].includes(form.value.launchType)
+);
+
+const buildGoalValue = computed<'package' | 'install'>(() => {
+  const goal = (form.value.buildGoal || '').trim();
+  return goal === 'install' ? 'install' : 'package';
 });
 
 const moduleOptions = computed(() => {
@@ -283,6 +424,8 @@ watch(
         isEdit.value = true;
         form.value = JSON.parse(JSON.stringify(props.serviceData));
         form.value.mavenModule = form.value.mavenModule || '';
+        form.value.mainClass = form.value.mainClass || '';
+        form.value.jarPath = form.value.jarPath || '';
         argsString.value = (form.value.args || []).join(' ');
         profilesString.value = (form.value.selectedProfiles || []).join(',');
       } else {
@@ -302,6 +445,9 @@ watch(
           mavenModule: '',
           stopTimeoutSecs: 10,
           injectProfileCustom: false,
+          buildGoal: 'package',
+          skipTests: true,
+          mainClass: '',
         };
         argsString.value = '';
         profilesString.value = 'dev';
@@ -310,6 +456,10 @@ watch(
       detectedModules.value = [];
       mavenInfo.value = null;
       detectedForDir.value = '';
+      locatedJarMessage.value = '';
+      locatedJarFound.value = false;
+      detectedMainClasses.value = [];
+      detectedMainHint.value = '';
       if (form.value.workDir) {
         // 编辑已有服务时，先探测一次模块信息，便于核对/调整启动模块
         void detectModules();
@@ -433,6 +583,66 @@ function addDetectedProfile(p: string) {
   }
 }
 
+/** 定位工程（优先启动模块）target 下的现有 JAR 产物 */
+async function locateJar() {
+  if (!form.value.workDir.trim()) return;
+  locatingJar.value = true;
+  locatedJarMessage.value = '';
+  try {
+    const jar = await invoke<string | null>('locate_built_jar', {
+      workDir: form.value.workDir.trim(),
+      module: form.value.mavenModule || '',
+    });
+    if (jar) {
+      locatedJarFound.value = true;
+      locatedJarMessage.value = `✓ 已定位 JAR: ${jar}`;
+      if (!form.value.jarPath?.trim()) {
+        form.value.jarPath = jar;
+      }
+    } else {
+      locatedJarFound.value = false;
+      locatedJarMessage.value = '⚠ 尚未发现构建产物，启动时会先执行构建再自动定位';
+    }
+  } catch (err: any) {
+    locatedJarFound.value = false;
+    locatedJarMessage.value = '⚠ ' + (err?.message || err);
+  } finally {
+    locatingJar.value = false;
+  }
+}
+
+/** 探测工程源码中的可执行主类（@SpringBootApplication 优先） */
+async function detectMainClasses() {
+  if (!form.value.workDir.trim()) return;
+  detectingMain.value = true;
+  detectedMainClasses.value = [];
+  detectedMainHint.value = '';
+  try {
+    const list = await invoke<MainClassCandidate[]>('detect_main_classes', {
+      workDir: form.value.workDir.trim(),
+      module: form.value.mavenModule || '',
+    });
+    if (list.length === 0) {
+      detectedMainHint.value =
+        '未扫描到含 @SpringBootApplication 或 main 方法的类，请检查目录/模块或手动填写全限定类名';
+    } else {
+      detectedMainClasses.value = list;
+      // 若当前主类为空且只有一个候选，直接自动填入
+      if (!form.value.mainClass?.trim() && list.length >= 1) {
+        selectMainClass(list[0].fqcn);
+      }
+    }
+  } catch (err: any) {
+    detectedMainHint.value = '探测失败: ' + (err?.message || err);
+  } finally {
+    detectingMain.value = false;
+  }
+}
+
+function selectMainClass(fqcn: string) {
+  form.value.mainClass = fqcn;
+}
+
 function save() {
   errorMessage.value = '';
   if (!form.value.name.trim()) {
@@ -451,6 +661,13 @@ function save() {
     errorMessage.value = '自定义命令模式下必须指定可执行程序路径';
     return;
   }
+  if (
+    form.value.launchType === 'source-main-class' &&
+    !(form.value.mainClass || '').trim()
+  ) {
+    errorMessage.value = '源码主类直启模式下必须指定启动主类，可点击「探测主类」自动识别';
+    return;
+  }
 
   // 解析 args
   const rawArgs = argsString.value.trim();
@@ -463,12 +680,25 @@ function save() {
     .filter(Boolean);
   form.value.selectedProfiles = rawProfiles.length > 0 ? rawProfiles : ['default'];
 
-  // 规范化 Maven 模块：非 Maven 启动方式不保留模块配置
-  const normalizedModule =
-    form.value.launchType === 'maven-wrapper' ? (form.value.mavenModule || '').trim() : '';
+  // 规范化 Maven 模块与新模式字段：非对应启动方式不保留无关配置
+  const isMavenLaunch = isMavenBasedLaunch.value;
+  const normalizedModule = isMavenLaunch ? (form.value.mavenModule || '').trim() : '';
+  const normalizedBuildGoal =
+    form.value.launchType === 'maven-build-jar' ? buildGoalValue.value : null;
+  const normalizedSkipTests =
+    form.value.launchType === 'maven-build-jar' ? !!form.value.skipTests : false;
+  const normalizedMainClass =
+    form.value.launchType === 'source-main-class' ? (form.value.mainClass || '').trim() : null;
 
   const payload: ServiceConfig = JSON.parse(JSON.stringify(form.value));
   payload.mavenModule = normalizedModule || null;
+  payload.buildGoal = normalizedBuildGoal;
+  payload.skipTests = normalizedSkipTests;
+  payload.mainClass = normalizedMainClass;
+  // 构建+JAR 模式下 jarPath 允许留空（自动定位），其余非 JAR 模式清空
+  if (form.value.launchType !== 'maven-build-jar' && form.value.launchType !== 'jar') {
+    payload.jarPath = '';
+  }
 
   emit('saved', payload);
   close();
@@ -576,10 +806,40 @@ function save() {
 .type-capsules {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
+}
+
+.goal-capsules {
+  display: flex;
+  gap: 6px;
+}
+
+.goal-btn {
+  flex: 1;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
+  border: 1px solid #3b4048;
+  background-color: #1b1d23;
+  color: #abb2bf;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.goal-btn.active {
+  background-color: #2c384e;
+  border-color: #528bff;
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.hint-info {
+  color: #9cdcfe;
 }
 
 .capsule-btn {
-  flex: 1;
+  flex: 1 1 auto;
   padding: 7px 10px;
   font-size: 12px;
   border: 1px solid #3b4048;
@@ -588,6 +848,7 @@ function save() {
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .capsule-btn.active {

@@ -51,6 +51,12 @@ pub enum ServiceStatus {
         started_at: String,
     },
     Stopping,
+    /// Maven 构建阶段（maven-build-jar 启动方式的第一阶段）
+    Building {
+        pid: u32,
+        /// 当前执行的 Maven 构建目标（package / install）
+        goal: String,
+    },
     Failed {
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
@@ -64,6 +70,16 @@ struct ActiveInstance {
     process_handle: usize,
     pid: u32,
     active_profiles: Vec<String>,
+}
+
+/// 受管进程启动后的句柄集合。
+/// 原始 job / process 句柄的所有权归调用方（登记进 instances 或任务表），
+/// 调用方在进程退出回调中负责释放。
+#[allow(dead_code)]
+pub(crate) struct SpawnHandles {
+    pub job_handle: usize,
+    pub process_handle: usize,
+    pub pid: u32,
 }
 
 #[derive(Clone)]
@@ -133,6 +149,11 @@ impl ProcessManager {
                 ServiceStatus::Stopping => {
                     return Err("Service is currently stopping, please wait".to_string());
                 }
+                ServiceStatus::Building { .. } => {
+                    return Err(
+                        "Maven 构建正在进行中，请等待构建完成或先停止".to_string()
+                    );
+                }
                 _ => {}
             }
         }
@@ -168,12 +189,7 @@ impl ProcessManager {
             config.inject_profile_custom,
         );
 
-        let active_profiles_for_record = config
-            .selected_profiles
-            .iter()
-            .filter(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("default"))
-            .cloned()
-            .collect::<Vec<_>>();
+        let active_profiles_for_record = effective_active_profiles(config);
 
         let built = match build_command(config, &profile_args) {
             Ok(res) => res,
@@ -204,13 +220,24 @@ impl ProcessManager {
 
         #[cfg(windows)]
         {
-            self.spawn_windows_process(
-                app_handle,
-                config,
-                &built.executable,
-                &built.args,
-                active_profiles_for_record,
-            )
+            if config.launch_type == LaunchType::MavenBuildJar {
+                // maven-build-jar：先构建，成功后自动运行 JAR
+                self.spawn_build_process(
+                    app_handle,
+                    config,
+                    &built.executable,
+                    &built.args,
+                    active_profiles_for_record,
+                )
+            } else {
+                self.spawn_service_process(
+                    app_handle,
+                    config,
+                    &built.executable,
+                    &built.args,
+                    active_profiles_for_record,
+                )
+            }
         }
 
         #[cfg(not(windows))]
@@ -219,32 +246,29 @@ impl ProcessManager {
         }
     }
 
+    /// 通用底层：创建 Job Object（挂起创建 + 先 Assign 再 Resume）+ 匿名管道捕获输出。
+    ///
+    /// 该函数不关心任何业务状态：进程退出后把退出码交给 `on_exit` 回调，
+    /// 由调用方决定后续状态迁移（服务运行结束、构建结束后启动 JAR、构建任务终态等）。
+    /// 服务启动与 Maven 工具箱构建任务共用这一底层。
     #[cfg(windows)]
-    fn spawn_windows_process(
-        &self,
+    pub(crate) fn spawn_managed_process(
         app_handle: Option<&AppHandle>,
-        config: &ServiceConfig,
+        log_manager: &LogManager,
+        service_id: &str,
+        work_dir: &str,
         executable: &str,
         args: &[String],
-        active_profiles: Vec<String>,
-    ) -> Result<(), String> {
+        on_exit: Box<dyn FnOnce(Option<i32>) + Send + 'static>,
+    ) -> Result<SpawnHandles, String> {
         unsafe {
             // 1. 创建 Job Object
             let h_job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if h_job.is_null() {
-                let err = format!(
+                return Err(format!(
                     "Failed to create Job Object, Win32 error={}",
                     std::io::Error::last_os_error()
-                );
-                self.set_status(
-                    app_handle,
-                    &config.id,
-                    ServiceStatus::Failed {
-                        exit_code: None,
-                        error: err.clone(),
-                    },
-                );
-                return Err(err);
+                ));
             }
 
             // 2. 设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -264,14 +288,6 @@ impl ProcessManager {
                     std::io::Error::last_os_error()
                 );
                 CloseHandle(h_job);
-                self.set_status(
-                    app_handle,
-                    &config.id,
-                    ServiceStatus::Failed {
-                        exit_code: None,
-                        error: err.clone(),
-                    },
-                );
                 return Err(err);
             }
 
@@ -289,14 +305,6 @@ impl ProcessManager {
                     std::io::Error::last_os_error()
                 );
                 CloseHandle(h_job);
-                self.set_status(
-                    app_handle,
-                    &config.id,
-                    ServiceStatus::Failed {
-                        exit_code: None,
-                        error: err.clone(),
-                    },
-                );
                 return Err(err);
             }
 
@@ -307,7 +315,7 @@ impl ProcessManager {
                 .chain(std::iter::once(0))
                 .collect();
 
-            let work_dir_utf16: Vec<u16> = OsStr::new(&config.work_dir)
+            let work_dir_utf16: Vec<u16> = OsStr::new(work_dir)
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
@@ -344,14 +352,6 @@ impl ProcessManager {
                 );
                 CloseHandle(h_read_pipe);
                 CloseHandle(h_job);
-                self.set_status(
-                    app_handle,
-                    &config.id,
-                    ServiceStatus::Failed {
-                        exit_code: None,
-                        error: err.clone(),
-                    },
-                );
                 return Err(err);
             }
 
@@ -367,14 +367,6 @@ impl ProcessManager {
                 CloseHandle(pi.hThread);
                 CloseHandle(h_read_pipe);
                 CloseHandle(h_job);
-                self.set_status(
-                    app_handle,
-                    &config.id,
-                    ServiceStatus::Failed {
-                        exit_code: None,
-                        error: err.clone(),
-                    },
-                );
                 return Err(err);
             }
 
@@ -385,44 +377,18 @@ impl ProcessManager {
             let pid = pi.dwProcessId;
             let h_process = pi.hProcess;
 
-            // 8. 记录活跃实例与状态
-            {
-                let mut instances = self.instances.lock().unwrap();
-                instances.insert(
-                    config.id.clone(),
-                    ActiveInstance {
-                        job_handle: h_job as usize,
-                        process_handle: h_process as usize,
-                        pid,
-                        active_profiles: active_profiles.clone(),
-                    },
-                );
-            }
-
-            let started_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            self.set_status(
-                app_handle,
-                &config.id,
-                ServiceStatus::Running {
-                    pid,
-                    active_profiles,
-                    started_at,
-                },
-            );
-
-            // 9. 开启异步线程读取管道输出
-            let log_mgr = self.log_manager.clone();
-            let service_id_for_log = config.id.clone();
+            // 8. 开启异步线程读取管道输出
+            let log_mgr = log_manager.clone();
+            let service_id_for_log = service_id.to_string();
             let app_for_log = app_handle.cloned();
             let read_pipe_raw = h_read_pipe as usize;
 
             thread::spawn(move || {
                 let file = File::from_raw_handle(read_pipe_raw as _);
                 let mut reader = BufReader::new(file);
-                let mut buffer = Vec::new();
 
                 loop {
-                    buffer.clear();
+                    let mut buffer = Vec::new();
                     match reader.read_until(b'\n', &mut buffer) {
                         Ok(0) => break,
                         Ok(_) => {
@@ -441,83 +407,398 @@ impl ProcessManager {
                 }
             });
 
-            // 10. 监听根进程生命周期
-            let self_clone = self.clone();
-            let service_id_for_watch = config.id.clone();
-            let app_for_watch = app_handle.cloned();
-            let proc_raw = h_process as usize;
-            let watched_pid = pid;
+            // 9. 监听根进程生命周期：复制一份句柄用于等待与取退出码，
+            //    原始句柄的所有权仍归调用方登记结构持有。
+            let wait_handle = match duplicate_handle(h_process) {
+                Some(h) => h,
+                None => {
+                    CloseHandle(h_read_pipe);
+                    CloseHandle(h_job);
+                    CloseHandle(h_process);
+                    return Err("Failed to duplicate process handle for watcher".to_string());
+                }
+            };
+            let wait_handle_raw = wait_handle as usize;
 
             thread::spawn(move || {
-                let h_proc = proc_raw as HANDLE;
-                WaitForSingleObject(h_proc, u32::MAX);
+                // HANDLE（*mut c_void）非 Send，经 usize 中转跨线程
+                let h_wait = wait_handle_raw as HANDLE;
+                WaitForSingleObject(h_wait, u32::MAX);
 
                 let mut exit_code: u32 = 0;
-                let got_code = GetExitCodeProcess(h_proc, &mut exit_code);
-
-                // 清理实例（只清理本次启动创建的实例，避免误删重启后的新实例）
-                let (h_job_to_close, h_proc_to_close) = {
-                    let mut instances = self_clone.instances.lock().unwrap();
-                    let belongs_to_this_run = instances
-                        .get(&service_id_for_watch)
-                        .map(|inst| inst.pid == watched_pid)
-                        .unwrap_or(false);
-                    if belongs_to_this_run {
-                        instances
-                            .remove(&service_id_for_watch)
-                            .map(|inst| (inst.job_handle as HANDLE, inst.process_handle as HANDLE))
-                            .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
-                    } else {
-                        (std::ptr::null_mut(), std::ptr::null_mut())
-                    }
-                };
-
-                if !h_job_to_close.is_null() {
-                    CloseHandle(h_job_to_close);
-                }
-                if !h_proc_to_close.is_null() {
-                    CloseHandle(h_proc_to_close);
-                }
+                let got_code = GetExitCodeProcess(h_wait, &mut exit_code);
+                CloseHandle(h_wait);
 
                 let code_opt = if got_code != FALSE {
                     Some(exit_code as i32)
                 } else {
                     None
                 };
-
-                // 判断是否是正常停止或异常退出
-                let current_status = self_clone.get_status(&service_id_for_watch);
-                if current_status == ServiceStatus::Stopping
-                    || current_status == ServiceStatus::Stopped
-                {
-                    return;
-                }
-
-                let msg = format!(
-                    "=== Service exited with code: {} ===",
-                    code_opt
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                );
-                self_clone.log_manager.append_log(
-                    app_for_watch.as_ref(),
-                    &service_id_for_watch,
-                    msg,
-                    "system",
-                );
-
-                let next_status = match code_opt {
-                    Some(code) if code != 0 => ServiceStatus::Failed {
-                        exit_code: Some(code),
-                        error: format!("进程退出，退出码: {}", code),
-                    },
-                    _ => ServiceStatus::Stopped,
-                };
-                self_clone.set_status(app_for_watch.as_ref(), &service_id_for_watch, next_status);
+                on_exit(code_opt);
             });
 
-            Ok(())
+            Ok(SpawnHandles {
+                job_handle: h_job as usize,
+                process_handle: h_process as usize,
+                pid,
+            })
         }
+    }
+
+    /// 服务运行阶段：spawn + 登记实例 + 置 Running + 退出后按退出码迁移状态。
+    #[cfg(windows)]
+    fn spawn_service_process(
+        &self,
+        app_handle: Option<&AppHandle>,
+        config: &ServiceConfig,
+        executable: &str,
+        args: &[String],
+        active_profiles: Vec<String>,
+    ) -> Result<(), String> {
+        let self_clone = self.clone();
+        let app_for_watch = app_handle.cloned();
+        let service_id = config.id.clone();
+        let watched_pid_holder = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+
+        let watched_pid_for_cb = std::sync::Arc::clone(&watched_pid_holder);
+        let on_exit = Box::new(move |code_opt: Option<i32>| {
+            let watched_pid = *watched_pid_for_cb.lock().unwrap();
+
+            // 清理实例（只清理本次启动创建的实例，避免误删重启后的新实例）
+            let (h_job_to_close, h_proc_to_close) = {
+                let mut instances = self_clone.instances.lock().unwrap();
+                let belongs_to_this_run = instances
+                    .get(&service_id)
+                    .map(|inst| inst.pid == watched_pid)
+                    .unwrap_or(false);
+                if belongs_to_this_run {
+                    instances
+                        .remove(&service_id)
+                        .map(|inst| (inst.job_handle as HANDLE, inst.process_handle as HANDLE))
+                        .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
+                } else {
+                    (std::ptr::null_mut(), std::ptr::null_mut())
+                }
+            };
+
+            if !h_job_to_close.is_null() {
+                unsafe { CloseHandle(h_job_to_close) };
+            }
+            if !h_proc_to_close.is_null() {
+                unsafe { CloseHandle(h_proc_to_close) };
+            }
+
+            // 若已被停止流程接管（Stopping / Stopped），不再覆盖状态
+            let current_status = self_clone.get_status(&service_id);
+            if current_status == ServiceStatus::Stopping
+                || current_status == ServiceStatus::Stopped
+            {
+                return;
+            }
+
+            let msg = format!(
+                "=== Service exited with code: {} ===",
+                code_opt
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            self_clone.log_manager.append_log(
+                app_for_watch.as_ref(),
+                &service_id,
+                msg,
+                "system",
+            );
+
+            let next_status = match code_opt {
+                Some(code) if code != 0 => ServiceStatus::Failed {
+                    exit_code: Some(code),
+                    error: format!("进程退出，退出码: {}", code),
+                },
+                _ => ServiceStatus::Stopped,
+            };
+            self_clone.set_status(app_for_watch.as_ref(), &service_id, next_status);
+        });
+
+        let handles = Self::spawn_managed_process(
+            app_handle,
+            &self.log_manager,
+            &config.id,
+            &config.work_dir,
+            executable,
+            args,
+            on_exit,
+        )?;
+
+        // 记录活跃实例与状态
+        {
+            let mut instances = self.instances.lock().unwrap();
+            instances.insert(
+                config.id.clone(),
+                ActiveInstance {
+                    job_handle: handles.job_handle,
+                    process_handle: handles.process_handle,
+                    pid: handles.pid,
+                    active_profiles: active_profiles.clone(),
+                },
+            );
+        }
+        *watched_pid_holder.lock().unwrap() = handles.pid;
+
+        let started_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        self.set_status(
+            app_handle,
+            &config.id,
+            ServiceStatus::Running {
+                pid: handles.pid,
+                active_profiles,
+                started_at,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Maven 构建阶段（maven-build-jar 第一阶段）：构建成功后自动定位 JAR 并运行。
+    #[cfg(windows)]
+    fn spawn_build_process(
+        &self,
+        app_handle: Option<&AppHandle>,
+        config: &ServiceConfig,
+        executable: &str,
+        args: &[String],
+        active_profiles: Vec<String>,
+    ) -> Result<(), String> {
+        let goal = config
+            .build_goal
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("package")
+            .to_string();
+
+        let self_clone = self.clone();
+        let app_for_watch = app_handle.cloned();
+        let service_id = config.id.clone();
+        let config_for_cb = config.clone();
+        let watched_pid_holder = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+
+        let watched_pid_for_cb = std::sync::Arc::clone(&watched_pid_holder);
+        let goal_for_cb = goal.clone();
+        let on_exit = Box::new(move |code_opt: Option<i32>| {
+            let watched_pid = *watched_pid_for_cb.lock().unwrap();
+
+            // 清理构建实例（归属判断防重启竞态）
+            let (h_job_to_close, h_proc_to_close) = {
+                let mut instances = self_clone.instances.lock().unwrap();
+                let belongs_to_this_run = instances
+                    .get(&service_id)
+                    .map(|inst| inst.pid == watched_pid)
+                    .unwrap_or(false);
+                if belongs_to_this_run {
+                    instances
+                        .remove(&service_id)
+                        .map(|inst| (inst.job_handle as HANDLE, inst.process_handle as HANDLE))
+                        .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
+                } else {
+                    (std::ptr::null_mut(), std::ptr::null_mut())
+                }
+            };
+            if !h_job_to_close.is_null() {
+                unsafe { CloseHandle(h_job_to_close) };
+            }
+            if !h_proc_to_close.is_null() {
+                unsafe { CloseHandle(h_proc_to_close) };
+            }
+
+            // 停止流程已接管（Stopping / Stopped）：构建被中止，不再继续
+            let current_status = self_clone.get_status(&service_id);
+            if current_status == ServiceStatus::Stopping
+                || current_status == ServiceStatus::Stopped
+            {
+                self_clone.log_manager.append_log(
+                    app_for_watch.as_ref(),
+                    &service_id,
+                    "=== Maven 构建已中止 ===".to_string(),
+                    "system",
+                );
+                return;
+            }
+
+            match code_opt {
+                Some(0) => {
+                    self_clone.log_manager.append_log(
+                        app_for_watch.as_ref(),
+                        &service_id,
+                        format!("=== Maven {} 构建成功 ===", goal_for_cb),
+                        "system",
+                    );
+                    if let Err(err) = self_clone.start_jar_after_build(
+                        app_for_watch.as_ref(),
+                        &config_for_cb,
+                    ) {
+                        self_clone.set_status(
+                            app_for_watch.as_ref(),
+                            &service_id,
+                            ServiceStatus::Failed {
+                                exit_code: None,
+                                error: err.clone(),
+                            },
+                        );
+                    }
+                }
+                Some(code) => {
+                    let msg = format!("=== Maven 构建失败，退出码: {} ===", code);
+                    self_clone
+                        .log_manager
+                        .append_log(app_for_watch.as_ref(), &service_id, msg, "system");
+                    self_clone.set_status(
+                        app_for_watch.as_ref(),
+                        &service_id,
+                        ServiceStatus::Failed {
+                            exit_code: Some(code),
+                            error: format!("Maven {} 构建失败，退出码: {}", goal_for_cb, code),
+                        },
+                    );
+                }
+                None => {
+                    self_clone.set_status(
+                        app_for_watch.as_ref(),
+                        &service_id,
+                        ServiceStatus::Failed {
+                            exit_code: None,
+                            error: "Maven 构建进程退出，未能获取退出码".to_string(),
+                        },
+                    );
+                }
+            }
+        });
+
+        let handles = Self::spawn_managed_process(
+            app_handle,
+            &self.log_manager,
+            &config.id,
+            &config.work_dir,
+            executable,
+            args,
+            on_exit,
+        )?;
+
+        // 构建进程登记进 instances，使停止按钮 / 重启在构建阶段同样有效
+        {
+            let mut instances = self.instances.lock().unwrap();
+            instances.insert(
+                config.id.clone(),
+                ActiveInstance {
+                    job_handle: handles.job_handle,
+                    process_handle: handles.process_handle,
+                    pid: handles.pid,
+                    active_profiles: active_profiles.clone(),
+                },
+            );
+        }
+        *watched_pid_holder.lock().unwrap() = handles.pid;
+
+        self.set_status(
+            app_handle,
+            &config.id,
+            ServiceStatus::Building {
+                pid: handles.pid,
+                goal,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Maven 构建成功后的第二阶段：定位产物 JAR 并以 java -jar 运行。
+    #[cfg(windows)]
+    fn start_jar_after_build(
+        &self,
+        app_handle: Option<&AppHandle>,
+        config: &ServiceConfig,
+    ) -> Result<(), String> {
+        // 构建结束与启动之间可能插入停止操作，启动前再校验一次
+        match self.get_status(&config.id) {
+            ServiceStatus::Stopping | ServiceStatus::Stopped => return Ok(()),
+            _ => {}
+        }
+
+        // JAR 定位：配置了 jar_path 则直接使用；模块未配置时自动探测启动模块，
+        // 再在「模块 target / 工程根 target」下自动定位（排除 sources 等附属产物）
+        let jar_path = match config
+            .jar_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            Some(p) => p.to_string(),
+            None => {
+                // 模块留空时复用 Maven 多模块探测结果（声明了 spring-boot-maven-plugin 的最浅模块）
+                let auto_module = if config
+                    .maven_module
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .is_some()
+                {
+                    None
+                } else {
+                    maven::inspect(&config.work_dir).suggested_module
+                };
+                let module = config
+                    .maven_module
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .or(auto_module.as_deref());
+
+                match maven::locate_built_jar(&config.work_dir, module)? {
+                    Some(jar) => jar,
+                    None => {
+                        return Err(format!(
+                            "构建成功，但在{}下未找到可运行的 JAR 产物（已排除 sources / javadoc 等附属包）。请确认该模块确实会产出 JAR，或在配置中手动指定 JAR 路径。",
+                            module
+                                .map(|m| format!("模块 {} 的 target", m))
+                                .unwrap_or_else(|| "工程 target".to_string())
+                        ));
+                    }
+                }
+            }
+        };
+
+        let profile_args = build_profile_args(
+            &LaunchType::MavenBuildJar,
+            &config.selected_profiles,
+            &config.args,
+            config.inject_profile_custom,
+        );
+
+        let java_cmd = config
+            .java_path
+            .as_ref()
+            .filter(|p| !p.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "java.exe".to_string());
+
+        let mut all_args = vec!["-jar".to_string(), jar_path.clone()];
+        all_args.extend(profile_args.iter().cloned());
+        all_args.extend(config.args.iter().cloned());
+
+        self.log_manager.append_log(
+            app_handle,
+            &config.id,
+            format!("=== 构建产物: {} ===", jar_path),
+            "system",
+        );
+        self.log_manager.append_log(
+            app_handle,
+            &config.id,
+            format!("Command: {} {}", java_cmd, all_args.join(" ")),
+            "system",
+        );
+
+        let active_profiles = effective_active_profiles(config);
+        self.spawn_service_process(app_handle, config, &java_cmd, &all_args, active_profiles)
     }
 
     /// 停止服务
@@ -653,8 +934,11 @@ impl ProcessManager {
         config: &ServiceConfig,
     ) -> Result<(), String> {
         let current = self.get_status(&config.id);
-        if let ServiceStatus::Running { .. } = current {
-            self.stop_service(app_handle, &config.id, config.stop_timeout_secs)?;
+        match current {
+            ServiceStatus::Running { .. } | ServiceStatus::Building { .. } => {
+                self.stop_service(app_handle, &config.id, config.stop_timeout_secs)?;
+            }
+            _ => {}
         }
 
         // 确保实例完全移出后再启动
@@ -683,6 +967,16 @@ impl ProcessManager {
             }
         }
     }
+}
+
+/// 计算实际生效的 Profile 列表（过滤空值与 default）。
+fn effective_active_profiles(config: &ServiceConfig) -> Vec<String> {
+    config
+        .selected_profiles
+        .iter()
+        .filter(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("default"))
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug)]
@@ -731,14 +1025,7 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
                 notes.push(note);
             }
 
-            // 在 Windows 下检查项目目录下是否存在 mvnw.cmd
-            let work_path = Path::new(&config.work_dir);
-            let mvnw_local = work_path.join("mvnw.cmd");
-            let cmd_path = if mvnw_local.exists() {
-                mvnw_local.to_string_lossy().to_string()
-            } else {
-                "mvn.cmd".to_string()
-            };
+            let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
 
             let mut maven_args = Vec::new();
             if let Some(module) = plan.module {
@@ -797,6 +1084,97 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
                 notes,
             })
         }
+        LaunchType::MavenBuildJar => {
+            // 第一阶段：全工程 Maven 构建（不带 -pl，聚合工程下所有模块都会被构建，
+            // install 时顺带解决跨模块依赖）；第二阶段在构建成功后自动定位启动模块
+            // target 下的 JAR 并以 java -jar 运行（见 start_jar_after_build）。
+            let goal = config
+                .build_goal
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("package")
+                .to_string();
+            let goal = crate::config::MavenGoal::parse(&goal)
+                .ok_or_else(|| format!("不支持的 Maven 构建目标: {}", goal))?
+                .as_str()
+                .to_string();
+
+            let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
+
+            let mut maven_args = vec![goal.clone()];
+            if config.skip_tests {
+                maven_args.push("-DskipTests".to_string());
+            }
+            maven_args.extend(config.args.iter().cloned());
+
+            notes.push(format!(
+                "构建+运行：先执行 mvn {}{}，构建成功后自动运行模块 target 下的 JAR",
+                goal,
+                if config.skip_tests { " -DskipTests" } else { "" }
+            ));
+
+            let mut wrapped = vec!["/c".to_string(), cmd_path];
+            wrapped.extend(maven_args);
+
+            Ok(BuiltCommand {
+                executable: "cmd.exe".to_string(),
+                args: wrapped,
+                notes,
+            })
+        }
+        LaunchType::SourceMainClass => {
+            // 直接通过源码启动类运行（IDEA “点 main 类运行”的命令行等价物）：
+            // mvn compile 先增量编译，exec:java 以项目依赖 + target/classes 在
+            // Maven JVM 内直接运行主类。
+            let main_class = config
+                .main_class
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    "源码主类直启模式下必须指定主类，请在「编辑配置」中探测或手动填写".to_string()
+                })?;
+
+            let plan = maven::plan_module(&config.work_dir, config.maven_module.as_deref())?;
+            if let Some(note) = plan.note {
+                notes.push(note);
+            }
+
+            let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
+
+            let mut maven_args = Vec::new();
+            if let Some(module) = plan.module {
+                maven_args.push("-pl".to_string());
+                maven_args.push(module);
+            }
+            maven_args.push("compile".to_string());
+            maven_args.push("exec:java".to_string());
+            maven_args.push(format!("-Dexec.mainClass={}", main_class));
+            maven_args.extend(profile_args.iter().cloned());
+            maven_args.extend(config.args.iter().cloned());
+
+            notes.push(format!("通过源码启动类运行: {}", main_class));
+
+            let mut wrapped = vec!["/c".to_string(), cmd_path];
+            wrapped.extend(maven_args);
+
+            Ok(BuiltCommand {
+                executable: "cmd.exe".to_string(),
+                args: wrapped,
+                notes,
+            })
+        }
+    }
+}
+
+/// 项目目录下存在 mvnw.cmd 则优先使用，否则使用 PATH 中的 mvn.cmd。
+fn maven_cmd_path(work_path: &Path) -> String {
+    let mvnw_local = work_path.join("mvnw.cmd");
+    if mvnw_local.exists() {
+        mvnw_local.to_string_lossy().to_string()
+    } else {
+        "mvn.cmd".to_string()
     }
 }
 
@@ -943,6 +1321,9 @@ mod tests {
             maven_module: None,
             stop_timeout_secs: 5,
             inject_profile_custom: false,
+            build_goal: None,
+            skip_tests: false,
+            main_class: None,
         }
     }
 
@@ -1067,6 +1448,15 @@ mod tests {
         assert!(json.get("active_profiles").is_none());
         assert!(json.get("started_at").is_none());
 
+        let building = ServiceStatus::Building {
+            pid: 7,
+            goal: "package".to_string(),
+        };
+        let json = serde_json::to_value(&building).unwrap();
+        assert_eq!(json["type"], "building");
+        assert_eq!(json["pid"], 7);
+        assert_eq!(json["goal"], "package");
+
         let failed = ServiceStatus::Failed {
             exit_code: Some(1),
             error: "boom".to_string(),
@@ -1096,6 +1486,78 @@ mod tests {
     }
 
     #[test]
+    fn test_maven_build_jar_command() {
+        let dir = temp_maven_project("build-jar");
+        let mut config = sample_config(dir.to_str().unwrap());
+        config.launch_type = LaunchType::MavenBuildJar;
+        config.build_goal = Some("install".to_string());
+        config.skip_tests = true;
+        config.args = vec!["-Dcustom.build.flag=1".to_string()];
+
+        let built = build_command(&config, &[]).unwrap();
+        assert_eq!(built.executable, "cmd.exe");
+        assert_eq!(built.args[0], "/c");
+        assert_eq!(built.args[1], "mvn.cmd");
+        assert_eq!(built.args[2], "install");
+        assert_eq!(built.args[3], "-DskipTests");
+        assert_eq!(built.args[4], "-Dcustom.build.flag=1");
+        assert!(built
+            .notes
+            .iter()
+            .any(|n| n.contains("mvn install -DskipTests")));
+
+        // 默认构建目标 package
+        let mut default_config = sample_config(dir.to_str().unwrap());
+        default_config.launch_type = LaunchType::MavenBuildJar;
+        default_config.build_goal = None;
+        default_config.skip_tests = false;
+        let built = build_command(&default_config, &[]).unwrap();
+        assert_eq!(built.args[2], "package");
+        assert!(!built.args.contains(&"-DskipTests".to_string()));
+
+        // 非法构建目标必须被拒绝
+        let mut bad = sample_config(dir.to_str().unwrap());
+        bad.launch_type = LaunchType::MavenBuildJar;
+        bad.build_goal = Some("deploy --evil".to_string());
+        assert!(build_command(&bad, &[]).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_source_main_class_command() {
+        let dir = temp_maven_project("source-main");
+        let mut config = sample_config(dir.to_str().unwrap());
+        config.launch_type = LaunchType::SourceMainClass;
+        config.main_class = Some("com.example.DemoApplication".to_string());
+        config.maven_module = Some("app".to_string());
+        config.selected_profiles = vec!["dev".to_string()];
+
+        let built = build_command(&config, &[]).unwrap();
+        assert_eq!(built.executable, "cmd.exe");
+        assert_eq!(built.args[0], "/c");
+        assert_eq!(built.args[1], "mvn.cmd");
+        assert_eq!(built.args[2], "-pl");
+        assert_eq!(built.args[3], "app");
+        assert_eq!(built.args[4], "compile");
+        assert_eq!(built.args[5], "exec:java");
+        assert_eq!(built.args[6], "-Dexec.mainClass=com.example.DemoApplication");
+        assert!(built
+            .notes
+            .iter()
+            .any(|n| n.contains("com.example.DemoApplication")));
+
+        // 缺少主类必须被拒绝
+        let mut missing = sample_config(dir.to_str().unwrap());
+        missing.launch_type = LaunchType::SourceMainClass;
+        missing.main_class = None;
+        let err = build_command(&missing, &[]).unwrap_err();
+        assert!(err.contains("主类"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_real_jar_lifecycle_and_job_object() {
         let fixture_dir = fixture_service_dir();
         let jar_path = fixture_dir.join("target").join("demo-service.jar");
@@ -1122,6 +1584,9 @@ mod tests {
             maven_module: None,
             stop_timeout_secs: 5,
             inject_profile_custom: false,
+            build_goal: None,
+            skip_tests: false,
+            main_class: None,
         };
 
         // 1. 启动服务
@@ -1209,6 +1674,9 @@ mod tests {
             maven_module: None,
             stop_timeout_secs: 5,
             inject_profile_custom: false,
+            build_goal: None,
+            skip_tests: false,
+            main_class: None,
         };
 
         // 启动初始为 dev

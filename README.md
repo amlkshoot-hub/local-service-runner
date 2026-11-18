@@ -6,7 +6,7 @@
 ![Vue](https://img.shields.io/badge/Vue-3-42B883)
 ![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6)
 
-> Windows 本地 Spring Boot 服务运行管理器：像 IntelliJ IDEA 的 Run 面板一样管理多个本地服务，负责启动、停止、重启、Profile 切换与实时日志，并保证 Maven/Gradle Wrapper 派生的 Java 进程一个都不残留。
+> Windows 本地 Spring Boot 服务运行管理器：像 IntelliJ IDEA 的 Run 面板一样管理多个本地服务，负责启动、停止、重启、Profile 切换与实时日志，内置 Maven 构建+JAR 运行、源码主类直启、Maven 工具箱与项目终端，并保证 Maven/Gradle Wrapper 派生的 Java 进程一个都不残留。
 >
 > A lightweight Windows desktop manager for local Spring Boot services, built with Tauri 2, Rust, Vue 3 and TypeScript. It focuses on reliable process-tree lifecycle control, Spring profile switching and streaming logs.
 
@@ -39,10 +39,35 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
 - **启动参数构建**：
   - **JAR 模式**：追加 `--spring.profiles.active=dev,local`
   - **Maven Wrapper 模式**：使用标准系统属性 `-Dspring-boot.run.profiles=dev,local`
+  - **构建+JAR 运行模式**：构建后以 `java -jar` 运行，追加 `--spring.profiles.active=dev,local`
+  - **源码主类直启模式**：通过 `-Dexec.args=--spring.profiles.active=dev,local` 传给 main 方法
   - **Gradle Wrapper 模式**：使用标准应用参数 `--args=--spring.profiles.active=dev,local`
   - **自定义命令**：提供可选 Profile 注入开关
 
-### 2. Windows 进程树与 Job Object 终极管控（最高优先级）
+### 2. 六种启动方式：JAR / Maven Wrapper / 构建+JAR / 源码主类 / Gradle / 自定义
+- **JAR 包**：直接 `java -jar <jar>`。
+- **Maven Wrapper**：`mvn -pl <module> spring-boot:run`，多模块自动定位。
+- **构建+JAR 运行（新增）**：一键“先构建后运行”：
+  - 启动时自动执行 `mvn install` 或 `mvn package`（可选 `-DskipTests`，默认跳过）；
+  - 构建全程在日志视窗实时可见，状态显示为「构建中」，可随时停止；
+  - 构建成功后自动在启动模块（或工程根）`target/` 下定位最新产物 JAR（排除 `*-sources.jar` / `*-tests.jar` / `*-javadoc.jar` 等附属包），并以 `java -jar` 拉起服务；
+  - 构建失败（非 0 退出码）状态标记为「异常退出」，不启动服务；
+  - 构建进程同样纳入 Job Object：停止即终止整棵 Maven 进程树。
+- **源码主类直启（新增）**：IDEA “点 main 类运行”的命令行等价物：
+  - 执行 `mvn -pl <module> compile exec:java -Dexec.mainClass=<主类>`；
+  - 主类可一键探测：扫描 `src/main/java` 下含 `@SpringBootApplication` 注解（优先）或 `public static void main` 的类；
+  - 修改源码后直接重启即生效，无需打包。
+- **Gradle Wrapper**：`gradlew bootRun`。
+- **自定义命令**：任意可执行程序。
+
+### 3. Maven 工具箱与项目终端（新增）
+- **一键 Maven 构建**：服务主面板提供 `Clean` / `Compile` / `Package` / `Install` 按钮，一键执行 `mvn clean / compile / package / install`（优先使用工程内 `mvnw.cmd`，全工程构建不带 `-pl`）；
+- **输出即日志**：构建输出进入该服务的实时日志视窗，GBK/UTF-8 自适应解码；
+- **可中断**：构建中可随时「停止构建」，内核级终结 Maven 进程树，不残留孤儿进程；
+- **互斥防呆**：服务运行中（JAR 被进程锁定）不允许发起构建，构建中不允许启动/重启服务；
+- **项目终端**：一键在服务工作目录唤起终端——优先 Windows Terminal（`wt -d <dir>`），未安装时回退 `cmd.exe` 新窗口；终端独立于本应用生命周期，关闭 Runner 不会连带关闭终端。
+
+### 4. Windows 进程树与 Job Object 终极管控（最高优先级）
 - **挂起启动彻底防逃逸**：
   - 创建原生 Windows Job Object，并配置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
   - 使用 `CREATE_SUSPENDED`（挂起）标志启动根进程。
@@ -57,7 +82,7 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
 - **崩溃自动保护**：
   - 依赖 Windows 操作系统的 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 特性，即使用户意外强制终止 Runner 或 Runner 异常退出，操作系统内核也会自动回收全部受管理的子进程。
 
-### 3. 高性能实时日志视窗
+### 5. 高性能实时日志视窗
 - **异步非阻塞管道**：Rust 后端通过 Windows 匿名管道异步读取标准输出与标准错误流，避免管道缓冲阻塞。
 - **编码自适应**：按行以 UTF-8 解码，失败时自动回退 GBK，兼容 Windows 中文环境下 Maven / Java 的 GBK 输出，不会因中文日志中断日志流。
 - **有界环形缓冲区**：每个服务独立维护最近 5000 行日志，超限丢弃最早行，内存占用恒定。
@@ -70,18 +95,18 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
   - 识别 INFO（蓝/白）、WARN（黄）、ERROR（红）、SYSTEM（紫）颜色高亮
   - 自动剥离 Spring Boot / Maven 输出的 ANSI 颜色转义字符
 
-### 4. IntelliJ IDEA 风格精致暗色界面
+### 6. IntelliJ IDEA 风格精致暗色界面
 - 基于 Vue 3 + TypeScript + 自定义精致 CSS，无臃肿第三方组件库。
 - 启动仅需数毫秒，内存占用低，高信息密度与纯正暗色工整布局。
 
-### 5. 项目目录选择与 Maven 多模块启动
+### 7. 项目目录选择与 Maven 多模块启动
 - **资源管理器选择目录**：添加/编辑服务时点击「📂 选择目录」直接弹出系统目录选择框，选中后自动回填工作目录；**服务名称默认取所选目录的最后一级目录名**（用户手动改过名称时不会被覆盖）。
-- **多模块自动识别**：自动扫描工程内真正在 `<build><plugins>` 中声明了 `spring-boot-maven-plugin` 的子模块。当工作目录是聚合根（packaging=pom）时，自动使用 `mvn -pl <module> spring-boot:run` 在正确的模块中启动，从根本上解决
-  `No plugin found for prefix 'spring-boot' in the current project` 导致服务完全无法启动的问题。
-- **模块可手动覆盖**：配置弹窗中可选择/切换启动模块（留空为自动检测），主界面标题处显示当前实际使用的模块。
-- **Profile 自动定位**：Profile 扫描会优先读取启动模块下的 `src/main/resources`，多模块工程同样能识别 `application-{profile}.yml`。
-- **启动失败可见**：进程以非 0 退出码结束时状态显示为「异常退出」，而不是「已停止」，便于快速定位问题。
-
+  - **多模块自动识别**：自动扫描工程内真正在 `<build><plugins>` 中声明了
+    `spring-boot-maven-plugin` 的子模块。当工作目录是聚合根（packaging=pom）时，自动使用 `mvn -pl <module> spring-boot:run` 在正确的模块中启动，从根本上解决
+    `No plugin found for prefix 'spring-boot' in the current project` 导致服务完全无法启动的问题。
+  - **模块可手动覆盖**：配置弹窗中可选择/切换启动模块（留空为自动检测），主界面标题处显示当前实际使用的模块；Maven 系启动方式（Wrapper / 构建+JAR / 源码主类）共用该模块选择：构建+JAR 模式下模块用于定位构建产物与 Profile 扫描，源码主类模式下模块用于 `-pl` 运行。
+  - **Profile 自动定位**：Profile 扫描会优先读取启动模块下的 `src/main/resources`，多模块工程同样能识别 `application-{profile}.yml`。
+  - **启动失败可见**：进程以非 0 退出码结束时状态显示为「异常退出」，而不是「已停止」，便于快速定位问题。
 > 说明：Maven 多模块工程的子模块 jar 需要存在于本地仓库，首次使用前请在工程根目录执行一次 `mvn install -DskipTests`（IDEA 会自动使用工作区模块，命令行 Maven 不会）。
 
 ---
@@ -102,17 +127,19 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
 local-service-runner/
 ├── src/                        # 前端 Vue 3 + TypeScript
 │   ├── components/
-│   │   └── ServiceModal.vue    # 服务配置模态框（增删改、Profile 扫描）
-│   ├── App.vue                 # 主界面（服务列表、控制台、实时日志）
+│   │   └── ServiceModal.vue    # 服务配置模态框（增删改、Profile 扫描、主类探测）
+│   ├── App.vue                 # 主界面（服务列表、控制台、实时日志、Maven 工具箱）
 │   ├── main.ts
 │   └── types.ts                # TypeScript 类型定义
 ├── src-tauri/                  # 后端 Rust + Win32 原生集成
 │   ├── src/
 │   │   ├── config.rs           # 服务配置原子持久化
-│   │   ├── maven.rs            # Maven 多模块工程探测与启动模块解析
+│   │   ├── maven.rs            # Maven 多模块工程探测、构建产物 JAR 定位、源码主类探测
+│   │   ├── maven_tasks.rs      # Maven 工具箱任务（clean/compile/package/install 可中断）
 │   │   ├── profiles.rs         # Spring Boot Profile 扫描与参数生成
-│   │   ├── process.rs          # Windows Job Object、挂起启动与进程树生命周期
+│   │   ├── process.rs          # Windows Job Object、挂起启动、受管进程底层与两阶段「构建+JAR」状态机
 │   │   ├── logs.rs             # 异步日志缓冲、GBK/UTF-8 解码、脱敏与事件推送
+│   │   ├── terminal.rs         # 项目终端唤起（wt 优先、cmd 回退）
 │   │   ├── commands.rs         # 受控 Tauri 命令接口（含目录选择）
 │   │   ├── lib.rs
 │   │   └── main.rs
@@ -179,6 +206,16 @@ cargo build --release
 | `test_build_profile_args_jar` | 验证 JAR 模式正确传入 `--spring.profiles.active=dev` | ✅ PASS |
 | `test_build_profile_args_maven` | 验证 Maven 模式传入 `-Dspring-boot.run.profiles=prod` | ✅ PASS |
 | `test_build_profile_args_gradle` | 验证 Gradle 模式传入 `--args=--spring.profiles.active=test` | ✅ PASS |
+| `test_build_profile_args_maven_build_jar` | 验证构建+JAR 模式最终以应用参数形式注入 Profile | ✅ PASS |
+| `test_build_profile_args_source_main_class` | 验证源码主类模式通过 `-Dexec.args` 注入 Profile | ✅ PASS |
+| `test_maven_build_jar_command` | 验证构建命令生成（goal / -DskipTests / 非法目标拒绝） | ✅ PASS |
+| `test_source_main_class_command` | 验证 `compile exec:java -Dexec.mainClass` 命令生成与主类缺失拒绝 | ✅ PASS |
+| `test_locate_built_jar_picks_latest_and_ignores_attachments` | 验证产物定位取最新且排除 sources/javadoc 附属包 | ✅ PASS |
+| `test_locate_built_jar_prefers_module_target` | 验证多模块下优先定位启动模块 target | ✅ PASS |
+| `test_locate_built_jar_missing_dir` | 验证目录缺失时的明确错误提示 | ✅ PASS |
+| `test_detect_main_classes_prefers_spring_boot_entry` | 验证主类探测优先 @SpringBootApplication 并过滤非入口类 | ✅ PASS |
+| `test_detect_main_classes_in_module` | 验证启动模块下的主类探测与回退行为 | ✅ PASS |
+| `test_fixture_main_class_and_jar_location` | 真实夹具冒烟：主类探测与产物 JAR 定位端到端可用 | ✅ PASS |
 | `test_format_active_profiles` | 验证多 Profile 格式化（保留顺序、过滤 default） | ✅ PASS |
 | `test_detect_profiles_in_maven_module` | 验证启动模块下的 `application-{profile}.yml` 扫描 | ✅ PASS |
 | `test_detects_module_in_aggregator` | 验证聚合根下自动定位声明了插件的可启动子模块 | ✅ PASS |
@@ -204,7 +241,15 @@ cargo build --release
 
 ## 更新记录
 
-### 2026-11-18
+### 2026-11-18（二）
+- **新增「构建+JAR 运行」启动方式**：先执行 `mvn install/package`（可选 `-DskipTests`）构建，成功后自动定位启动模块 `target` 下最新 JAR（排除 sources/javadoc 等附属产物）并以 `java -jar` 运行；构建阶段新增 `building` 状态、全程实时日志、可随时停止；构建失败标记「异常退出」；模块留空时自动复用 spring-boot 插件探测结果定位产物。
+- **新增「源码主类直启」启动方式**：`mvn -pl <module> compile exec:java -Dexec.mainClass=<主类>`，支持一键探测源码主类（`@SpringBootApplication` 优先），Profile 通过 `-Dexec.args` 注入，改完源码重启即生效。
+- **新增 Maven 工具箱**：服务面板一键 `mvn clean / compile / package / install`（优先 mvnw.cmd，全工程构建），输出进实时日志视窗，可中断（内核级终结进程树）；与服务运行状态互斥防呆（运行中的 JAR 被锁定时禁止构建，构建中禁止启动/重启）。
+- **新增项目终端**：一键在服务工作目录唤起终端（Windows Terminal 优先，cmd 回退），终端独立于 Runner 生命周期。
+- **底层重构**：抽出可复用的受管进程启动器（Job Object + 挂起 + 管道 + 生命周期回调），服务运行、构建阶段与 Maven 工具箱任务共用同一套进程树治理；应用退出时同步清理构建任务进程。
+- 配置兼容：`services.json` 旧配置无需迁移，新增字段自动缺省。
+
+### 2026-11-18（一）
 - **修复点击启动后界面变黑 / 卡死**：`ServiceStatus` 枚举的 `rename_all` 只重命名变体名，不重命名变体内的字段，导致前端拿到的状态是 `active_profiles` / `started_at` / `exit_code`，而前端按 `activeProfiles` 读取，在「运行中」状态渲染时抛出 `TypeError: Cannot read properties of undefined (reading 'length')`，Vue 根组件渲染失败后整个界面只剩黑屏。
   现已显式指定 `activeProfiles` / `startedAt` / `exitCode`，并让前端对缺失字段做防御性处理，同时新增序列化回归测试。
 - 日志控制台自动剥离 Spring Boot / Maven 输出的 ANSI 颜色转义字符，避免出现 `[0;39m` 等乱码。

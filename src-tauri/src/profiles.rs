@@ -120,7 +120,8 @@ pub fn build_profile_args(
     }
 
     match launch_type {
-        LaunchType::Jar => {
+        LaunchType::Jar | LaunchType::MavenBuildJar => {
+            // 构建完成后最终以 java -jar 运行，走应用参数形式
             vec![format!("--spring.profiles.active={}", active_str)]
         }
         LaunchType::MavenWrapper => {
@@ -130,6 +131,10 @@ pub fn build_profile_args(
         LaunchType::GradleWrapper => {
             // Spring Boot Gradle Plugin bootRun 规范使用 --args
             vec![format!("--args=--spring.profiles.active={}", active_str)]
+        }
+        LaunchType::SourceMainClass => {
+            // exec:java 通过 exec.args 把应用参数传给 main 方法
+            vec![format!("-Dexec.args=--spring.profiles.active={}", active_str)]
         }
         LaunchType::Custom => {
             if inject_profile_custom {
@@ -181,6 +186,20 @@ mod tests {
         let profiles = vec!["test".to_string()];
         let args = build_profile_args(&LaunchType::GradleWrapper, &profiles, &[], false);
         assert_eq!(args, vec!["--args=--spring.profiles.active=test"]);
+    }
+
+    #[test]
+    fn test_build_profile_args_maven_build_jar() {
+        let profiles = vec!["dev".to_string(), "local".to_string()];
+        let args = build_profile_args(&LaunchType::MavenBuildJar, &profiles, &[], false);
+        assert_eq!(args, vec!["--spring.profiles.active=dev,local"]);
+    }
+
+    #[test]
+    fn test_build_profile_args_source_main_class() {
+        let profiles = vec!["prod".to_string()];
+        let args = build_profile_args(&LaunchType::SourceMainClass, &profiles, &[], false);
+        assert_eq!(args, vec!["-Dexec.args=--spring.profiles.active=prod"]);
     }
 
     #[test]

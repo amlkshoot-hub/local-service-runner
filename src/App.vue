@@ -59,7 +59,7 @@
             <!-- 悬浮快捷控制 -->
             <div class="service-actions" @click.stop>
               <button
-                v-if="!isRunning(svc.id) && !isStarting(svc.id)"
+                v-if="!isRunning(svc.id) && !isStarting(svc.id) && !isBuilding(svc.id)"
                 class="action-icon-btn start-icon"
                 title="启动"
                 @click="startService(svc.id)"
@@ -67,7 +67,7 @@
                 ▶
               </button>
               <button
-                v-if="isRunning(svc.id) || isStarting(svc.id)"
+                v-if="isRunning(svc.id) || isStarting(svc.id) || isBuilding(svc.id)"
                 class="action-icon-btn stop-icon"
                 title="停止"
                 @click="stopService(svc.id)"
@@ -94,9 +94,7 @@
                   {{ currentService.name }}
                   <span class="type-pill">
                     {{ getLaunchTypeLabel(currentService.launchType) }}
-                    <template
-                      v-if="currentModule && currentService.launchType === 'maven-wrapper'"
-                    >
+                    <template v-if="currentModule && isMavenLaunchType">
                       · {{ currentModule }}
                     </template>
                   </span>
@@ -160,29 +158,97 @@
               <div class="action-btn-group">
                 <button
                   class="btn primary action-btn"
-                  :disabled="isRunning(currentService.id) || isStarting(currentService.id) || isStopping(currentService.id)"
+                  :disabled="
+                    isRunning(currentService.id) ||
+                    isStarting(currentService.id) ||
+                    isStopping(currentService.id) ||
+                    isBuilding(currentService.id) ||
+                    isMavenTaskRunning(currentService.id)
+                  "
                   @click="startCurrentService"
                 >
                   <span class="btn-icon">▶</span> 启动
                 </button>
                 <button
                   class="btn danger action-btn"
-                  :disabled="!isRunning(currentService.id) && !isStarting(currentService.id)"
+                  :disabled="
+                    !isRunning(currentService.id) &&
+                    !isStarting(currentService.id) &&
+                    !isBuilding(currentService.id)
+                  "
                   @click="stopCurrentService"
                 >
                   <span class="btn-icon">■</span> 停止
                 </button>
                 <button
                   class="btn secondary action-btn"
-                  :disabled="!isRunning(currentService.id)"
+                  :disabled="!isRunning(currentService.id) && !isBuilding(currentService.id)"
                   @click="restartCurrentService"
                 >
                   <span class="btn-icon">↻</span> 重启
                 </button>
               </div>
 
+              <!-- Maven 工具箱 + 项目终端 -->
+              <div class="maven-toolbox">
+                <button
+                  class="btn secondary action-btn terminal-btn"
+                  title="在项目目录唤起终端（Windows Terminal / cmd）"
+                  @click="openTerminal"
+                >
+                  <span class="btn-icon">>_</span> 终端
+                </button>
+                <template v-if="isMavenLaunchType">
+                  <template v-if="!isMavenTaskRunning(currentService.id)">
+                    <button
+                      class="btn secondary action-btn"
+                      :disabled="!canRunMavenTask"
+                      title="mvn clean：清理工程 target 目录"
+                      @click="runMavenTask('clean')"
+                    >
+                      Clean
+                    </button>
+                    <button
+                      class="btn secondary action-btn"
+                      :disabled="!canRunMavenTask"
+                      title="mvn compile：增量编译工程"
+                      @click="runMavenTask('compile')"
+                    >
+                      Compile
+                    </button>
+                    <button
+                      class="btn secondary action-btn"
+                      :disabled="!canRunMavenTask"
+                      title="mvn package：打包全工程（不运行服务）"
+                      @click="runMavenTask('package')"
+                    >
+                      Package
+                    </button>
+                    <button
+                      class="btn secondary action-btn"
+                      :disabled="!canRunMavenTask"
+                      title="mvn install：构建并安装到本地仓库"
+                      @click="runMavenTask('install')"
+                    >
+                      Install
+                    </button>
+                  </template>
+                  <template v-else>
+                    <span class="task-badge running">
+                      mvn {{ getMavenTaskGoal(currentService.id) }} 构建中...
+                    </span>
+                    <button class="btn danger action-btn" @click="stopMavenTask">
+                      停止构建
+                    </button>
+                  </template>
+                </template>
+              </div>
+
               <!-- 状态与 PID -->
               <div class="status-summary">
+                <span v-if="mavenTaskBadge" :class="['task-badge', mavenTaskBadge.cls]">
+                  {{ mavenTaskBadge.text }}
+                </span>
                 <span class="state-label">{{ getStatusText(currentService.id) }}</span>
                 <span v-if="getPid(currentService.id)" class="pid-tag">
                   PID: {{ getPid(currentService.id) }}
@@ -257,6 +323,8 @@ import { listen } from '@tauri-apps/api/event';
 import ServiceModal from './components/ServiceModal.vue';
 import type {
   MavenProjectInfo,
+  MavenTaskStatus,
+  MavenTaskStatusEvent,
   ServiceConfig,
   ServiceStatus,
   LogEntry,
@@ -282,6 +350,9 @@ const currentModule = ref('');
 const profileSelectValue = ref('dev');
 const isCustomProfileInput = ref(false);
 const customProfileInput = ref('');
+
+// Maven 工具箱任务状态：serviceId -> MavenTaskStatus
+const mavenTaskMap = ref<Record<string, MavenTaskStatus>>({});
 
 // 日志视窗控制
 const logFilter = ref('');
@@ -317,6 +388,38 @@ const filteredLogs = computed(() => {
   return all.filter((l) => l.content.toLowerCase().includes(q));
 });
 
+// 当前服务是否 Maven 系启动方式（决定是否展示 Maven 工具箱）
+const isMavenLaunchType = computed(() => {
+  if (!currentService.value) return false;
+  return ['maven-wrapper', 'maven-build-jar', 'source-main-class'].includes(
+    currentService.value.launchType
+  );
+});
+
+// 能否对当前服务发起 Maven 构建任务：服务处于停止/异常状态且没有任务在跑
+const canRunMavenTask = computed(() => {
+  if (!currentService.value) return false;
+  const id = currentService.value.id;
+  const status = statusMap.value[id];
+  const serviceIdle =
+    !status || status.type === 'stopped' || status.type === 'failed';
+  return serviceIdle && !isMavenTaskRunning(id);
+});
+
+// Maven 工具箱最近一次任务结果徽章
+const mavenTaskBadge = computed<{ text: string; cls: string } | null>(() => {
+  if (!currentService.value) return null;
+  const status = mavenTaskMap.value[currentService.value.id];
+  if (!status) return null;
+  if (status.type === 'success') {
+    return { text: `mvn ${status.goal} 成功`, cls: 'ok' };
+  }
+  if (status.type === 'failed') {
+    return { text: `mvn ${status.goal} 失败 (exit ${status.exitCode})`, cls: 'err' };
+  }
+  return null;
+});
+
 onMounted(async () => {
   await loadServices();
   await loadAllStatuses();
@@ -342,6 +445,12 @@ onMounted(async () => {
   await listen<StatusChangeEvent>('service-status-change', (event) => {
     const { serviceId, status } = event.payload;
     statusMap.value[serviceId] = status;
+  });
+
+  // 监听 Maven 工具箱任务状态变更
+  await listen<MavenTaskStatusEvent>('maven-task-status-change', (event) => {
+    const { serviceId, status } = event.payload;
+    mavenTaskMap.value[serviceId] = status;
   });
 });
 
@@ -381,10 +490,18 @@ async function selectService(svc: ServiceConfig) {
     }
   }
 
+  // 加载该服务的 Maven 工具箱任务状态
+  try {
+    const taskStatus = await invoke<MavenTaskStatus>('get_maven_task_status', { id: svc.id });
+    mavenTaskMap.value[svc.id] = taskStatus;
+  } catch (err) {
+    console.error('Failed to load maven task status:', err);
+  }
+
   // 扫描该服务支持的 profiles（多模块工程需要定位到启动模块的 resources）
   currentModule.value = (svc.mavenModule || '').trim();
   try {
-    if (!currentModule.value && svc.launchType === 'maven-wrapper') {
+    if (!currentModule.value && isMavenLaunchTypeOf(svc)) {
       const info = await invoke<MavenProjectInfo>('detect_maven_modules', {
         workDir: svc.workDir,
       });
@@ -400,6 +517,11 @@ async function selectService(svc: ServiceConfig) {
   }
 
   scrollToBottom();
+}
+
+/** 判断服务的启动类型是否为 Maven 系（供模块探测使用） */
+function isMavenLaunchTypeOf(svc: ServiceConfig): boolean {
+  return ['maven-wrapper', 'maven-build-jar', 'source-main-class'].includes(svc.launchType);
 }
 
 function initProfileSelector(svc: ServiceConfig) {
@@ -489,6 +611,47 @@ async function restartCurrentService() {
   }
 }
 
+// Maven 工具箱任务
+async function runMavenTask(goal: string) {
+  if (!currentService.value) return;
+  try {
+    await invoke('run_maven_task', { id: currentService.value.id, goal });
+  } catch (err: any) {
+    alert('构建任务启动失败: ' + (err?.message || err));
+  }
+}
+
+async function stopMavenTask() {
+  if (!currentService.value) return;
+  try {
+    await invoke('stop_maven_task', { id: currentService.value.id });
+  } catch (err: any) {
+    alert('停止构建失败: ' + (err?.message || err));
+  }
+}
+
+function isMavenTaskRunning(id: string) {
+  return mavenTaskMap.value[id]?.type === 'running';
+}
+
+function getMavenTaskGoal(id: string): string {
+  const status = mavenTaskMap.value[id];
+  if (status && status.type === 'running') {
+    return status.goal;
+  }
+  return '';
+}
+
+// 项目终端
+async function openTerminal() {
+  if (!currentService.value) return;
+  try {
+    await invoke('open_service_terminal', { id: currentService.value.id });
+  } catch (err: any) {
+    alert('打开终端失败: ' + (err?.message || err));
+  }
+}
+
 function isRunning(id: string) {
   return statusMap.value[id]?.type === 'running';
 }
@@ -501,9 +664,14 @@ function isStopping(id: string) {
   return statusMap.value[id]?.type === 'stopping';
 }
 
+function isBuilding(id: string) {
+  return statusMap.value[id]?.type === 'building';
+}
+
 function getStatusClass(id: string) {
   const status = statusMap.value[id];
   if (!status) return 'stopped';
+  if (status.type === 'building') return 'starting';
   return status.type;
 }
 
@@ -515,6 +683,8 @@ function getStatusText(id: string) {
       return '运行中';
     case 'starting':
       return '启动中...';
+    case 'building':
+      return `构建中 (mvn ${status.goal})...`;
     case 'stopping':
       return '停止中...';
     case 'failed':
@@ -551,6 +721,10 @@ function getLaunchTypeLabel(type: string): string {
       return 'JAR';
     case 'maven-wrapper':
       return 'Maven';
+    case 'maven-build-jar':
+      return '构建+JAR';
+    case 'source-main-class':
+      return '源码直启';
     case 'gradle-wrapper':
       return 'Gradle';
     case 'custom':
@@ -1067,6 +1241,41 @@ html {
 .action-btn-group {
   display: flex;
   gap: 6px;
+}
+
+/* Maven 工具箱 */
+.maven-toolbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid #3c3c3c;
+}
+
+.task-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.task-badge.running {
+  background-color: rgba(204, 167, 0, 0.15);
+  color: #cca700;
+  border: 1px solid rgba(204, 167, 0, 0.35);
+}
+
+.task-badge.ok {
+  background-color: rgba(137, 209, 133, 0.15);
+  color: #89d185;
+  border: 1px solid rgba(137, 209, 133, 0.35);
+}
+
+.task-badge.err {
+  background-color: rgba(241, 76, 76, 0.15);
+  color: #f14c4c;
+  border: 1px solid rgba(241, 76, 76, 0.35);
 }
 
 .action-btn {

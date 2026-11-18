@@ -10,6 +10,15 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainClassCandidate {
+    /// 全限定类名，如 com.example.DemoApplication
+    pub fqcn: String,
+    /// 是否带 @SpringBootApplication 注解（优先推荐）
+    pub is_spring_boot_entry: bool,
+}
+
 /// 递归扫描时跳过的目录，避免遍历 node_modules / target 等体积巨大的目录。
 const SKIP_DIRS: &[&str] = &[
     "target",
@@ -256,6 +265,159 @@ fn has_modules_section(pom_text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 在指定目录（优先启动模块，其次工程根）的 `target/` 下定位构建产物 JAR。
+///
+/// 规则：
+/// - 排除 `*-sources.jar`、`*-tests.jar`、`*-javadoc.jar` 等附属产物；
+/// - 命中多个候选时取**修改时间最新**的一个；
+/// - 返回绝对路径；找不到返回 `Ok(None)`。
+pub fn locate_built_jar(work_dir: &str, module: Option<&str>) -> Result<Option<String>, String> {
+    let root = Path::new(work_dir);
+    if !root.is_dir() {
+        return Err(format!("工作目录不存在: {}", work_dir));
+    }
+
+    let mut target_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(module) = module.map(str::trim).filter(|m| !m.is_empty()) {
+        target_dirs.push(root.join(module).join("target"));
+    }
+    target_dirs.push(root.join("target"));
+
+    for target_dir in target_dirs {
+        if !target_dir.is_dir() {
+            continue;
+        }
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&target_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if !name.ends_with(".jar") {
+                    continue;
+                }
+                if name.ends_with("-sources.jar")
+                    || name.ends_with("-tests.jar")
+                    || name.ends_with("-test-sources.jar")
+                    || name.ends_with("-javadoc.jar")
+                    || name.ends_with("-testsuite.jar")
+                {
+                    continue;
+                }
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                candidates.push((path, mtime));
+            }
+        }
+        if !candidates.is_empty() {
+            candidates.sort_by(|a, b| b.1.cmp(&a.1));
+            return Ok(Some(
+                candidates[0]
+                    .0
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 扫描源码目录中的可执行主类（全限定名）。
+///
+/// 优先返回带 `@SpringBootApplication` 注解的类；其次返回含
+/// `public static void main` 的类。二者同时存在时 Spring Boot 入口排在前。
+pub fn detect_main_classes(work_dir: &str, module: Option<&str>) -> Vec<MainClassCandidate> {
+    let root = Path::new(work_dir);
+    let module = module.map(str::trim).filter(|m| !m.is_empty());
+
+    let mut source_roots = Vec::new();
+    if let Some(module) = module {
+        source_roots.push(root.join(module).join("src").join("main").join("java"));
+    }
+    source_roots.push(root.join("src").join("main").join("java"));
+
+    let mut results: Vec<MainClassCandidate> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for src_root in source_roots {
+        if !src_root.is_dir() {
+            continue;
+        }
+        let mut java_files: Vec<PathBuf> = Vec::new();
+        collect_java_files(&src_root, &mut java_files);
+
+        for file in java_files {
+            let Ok(text) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let is_boot = text.contains("@SpringBootApplication");
+            let has_main = text.contains("static void main");
+            if !is_boot && !has_main {
+                continue;
+            }
+            let Some(fqcn) = java_file_to_fqcn(&src_root, &file) else {
+                continue;
+            };
+            if seen.insert(fqcn.clone()) {
+                results.push(MainClassCandidate {
+                    fqcn,
+                    is_spring_boot_entry: is_boot,
+                });
+            }
+        }
+    }
+
+    // Spring Boot 入口优先，其余按名称稳定排序
+    results.sort_by(|a, b| {
+        b.is_spring_boot_entry
+            .cmp(&a.is_spring_boot_entry)
+            .then_with(|| a.fqcn.cmp(&b.fqcn))
+    });
+    results
+}
+
+fn collect_java_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_java_files(&path, out);
+        } else if entry
+            .file_name()
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with(".java")
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// 把 `src/main/java` 下的相对路径转换为全限定类名。
+fn java_file_to_fqcn(src_root: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(src_root).ok()?;
+    let mut parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let last = parts.pop()?;
+    let class_name = last.strip_suffix(".java")?;
+    parts.push(class_name.to_string());
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("."))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +548,140 @@ mod tests {
         assert!(err.contains("pom.xml"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_locate_built_jar_picks_latest_and_ignores_attachments() {
+        let dir = temp_project("locate-jar");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+
+        // 不应命中的附属产物
+        fs::write(target.join("app-sources.jar"), b"x").unwrap();
+        fs::write(target.join("app-javadoc.jar"), b"x").unwrap();
+        // Spring Boot repackage 前的原始产物（扩展名不是 .jar，天然不参与匹配）
+        fs::write(target.join("app.jar.original"), b"x").unwrap();
+
+        fs::write(target.join("old.jar"), b"x").unwrap();
+        // 让 old.jar 的修改时间显著早于 app.jar
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let f = fs::File::options()
+            .append(true)
+            .open(target.join("old.jar"))
+            .unwrap();
+        f.set_modified(old_time).unwrap();
+        fs::write(target.join("app.jar"), b"x").unwrap();
+
+        let found = locate_built_jar(dir.to_str().unwrap(), None).unwrap();
+        assert!(found.is_some());
+        let path = found.unwrap();
+        assert!(path.replace('\\', "/").ends_with("target/app.jar"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_locate_built_jar_prefers_module_target() {
+        let dir = temp_project("locate-module");
+        let module_target = dir.join("ry-admin").join("target");
+        fs::create_dir_all(&module_target).unwrap();
+        fs::write(module_target.join("ry-admin.jar"), b"x").unwrap();
+
+        let found = locate_built_jar(dir.to_str().unwrap(), Some("ry-admin")).unwrap();
+        assert!(found
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("ry-admin/target/ry-admin.jar"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_locate_built_jar_missing_dir() {
+        let err = locate_built_jar(r"D:\__definitely_missing__", None).unwrap_err();
+        assert!(err.contains("工作目录不存在"));
+    }
+
+    #[test]
+    fn test_detect_main_classes_prefers_spring_boot_entry() {
+        let dir = temp_project("main-class");
+        let java_root = dir.join("src").join("main").join("java").join("com").join("example");
+        fs::create_dir_all(&java_root).unwrap();
+        fs::write(
+            java_root.join("DemoApplication.java"),
+            "@SpringBootApplication\npublic class DemoApplication {\n    public static void main(String[] args) {}\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            java_root.join("CliTool.java"),
+            "public class CliTool {\n    public static void main(String[] args) {}\n}\n",
+        )
+        .unwrap();
+        fs::write(java_root.join("Plain.java"), "public class Plain {}\n").unwrap();
+
+        let classes = detect_main_classes(dir.to_str().unwrap(), None);
+        assert_eq!(classes.len(), 2);
+        assert_eq!(classes[0].fqcn, "com.example.DemoApplication");
+        assert!(classes[0].is_spring_boot_entry);
+        assert_eq!(classes[1].fqcn, "com.example.CliTool");
+        assert!(!classes[1].is_spring_boot_entry);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_main_classes_in_module() {
+        let dir = temp_project("main-class-module");
+        let module_java = dir
+            .join("ry-admin")
+            .join("src")
+            .join("main")
+            .join("java")
+            .join("admin");
+        fs::create_dir_all(&module_java).unwrap();
+        fs::write(
+            module_java.join("AdminApplication.java"),
+            "@SpringBootApplication\npublic class AdminApplication {}\n",
+        )
+        .unwrap();
+
+        let classes = detect_main_classes(dir.to_str().unwrap(), Some("ry-admin"));
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].fqcn, "admin.AdminApplication");
+
+        // 未指定模块时回退工程根目录，应一无所获
+        assert!(detect_main_classes(dir.to_str().unwrap(), None).is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 基于仓库内真实夹具的冒烟验证：源码主类探测与构建产物定位。
+    /// 夹具不存在时（浅克隆等场景）自动跳过。
+    #[test]
+    fn test_fixture_main_class_and_jar_location() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri should have a parent directory")
+            .join("fixtures")
+            .join("demo-spring-service");
+        if !fixture.is_dir() {
+            return;
+        }
+
+        // 夹具主类是"无需 Spring 依赖"的仿真服务：只有 main 方法、没有
+        // @SpringBootApplication 注解，因此 is_spring_boot_entry 应为 false
+        let classes = detect_main_classes(fixture.to_string_lossy().as_ref(), None);
+        assert_eq!(
+            classes,
+            vec![MainClassCandidate {
+                fqcn: "com.example.demo.DemoApplication".to_string(),
+                is_spring_boot_entry: false,
+            }]
+        );
+
+        let jar = locate_built_jar(fixture.to_string_lossy().as_ref(), None)
+            .expect("fixture dir should be readable")
+            .expect("fixture jar should be located");
+        assert!(jar.replace('\\', "/").ends_with("target/demo-service.jar"));
     }
 }

@@ -11,11 +11,47 @@ pub enum LaunchType {
     MavenWrapper,
     GradleWrapper,
     Custom,
+    /// 先执行 mvn install/package 构建，成功后自动定位并运行 target 下的 JAR
+    MavenBuildJar,
+    /// 直接通过源码启动类运行（mvn compile exec:java）
+    SourceMainClass,
 }
 
 impl Default for LaunchType {
     fn default() -> Self {
         LaunchType::Jar
+    }
+}
+
+/// Maven 构建目标
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MavenGoal {
+    Clean,
+    Compile,
+    Package,
+    Install,
+}
+
+impl MavenGoal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MavenGoal::Clean => "clean",
+            MavenGoal::Compile => "compile",
+            MavenGoal::Package => "package",
+            MavenGoal::Install => "install",
+        }
+    }
+
+    /// 把前端传入的任意 goal 字符串安全转换为受支持的 Maven 生命周期目标。
+    pub fn parse(goal: &str) -> Option<Self> {
+        match goal.trim().to_ascii_lowercase().as_str() {
+            "clean" => Some(MavenGoal::Clean),
+            "compile" => Some(MavenGoal::Compile),
+            "package" => Some(MavenGoal::Package),
+            "install" => Some(MavenGoal::Install),
+            _ => None,
+        }
     }
 }
 
@@ -48,10 +84,24 @@ pub struct ServiceConfig {
     pub stop_timeout_secs: u64,
     #[serde(default)]
     pub inject_profile_custom: bool,
+    /// maven-build-jar：构建目标（package / install），留空默认 package
+    #[serde(default)]
+    pub build_goal: Option<String>,
+    /// maven-build-jar：构建时是否追加 -DskipTests
+    #[serde(default = "default_skip_tests")]
+    pub skip_tests: bool,
+    /// source-main-class：主类全限定名（如 com.example.DemoApplication）
+    #[serde(default)]
+    pub main_class: Option<String>,
 }
 
 fn default_stop_timeout() -> u64 {
     10
+}
+
+/// 构建+运行场景下默认跳过测试，保证"点启动→能快速跑起来"的体验
+fn default_skip_tests() -> bool {
+    true
 }
 
 pub struct ConfigManager {
