@@ -15,11 +15,15 @@ use config::ConfigManager;
 use logs::LogManager;
 use maven_tasks::MavenTaskManager;
 use process::{ProcessManager, ServiceStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Listener, Manager};
 use tauri_plugin_notification::NotificationExt;
+
+/// 首次隐藏到托盘时是否已弹过提示（每个进程生命周期只提示一次）
+static TRAY_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -67,6 +71,8 @@ pub fn run() {
             commands::export_services,
             commands::import_services,
             commands::clone_service,
+            commands::open_url,
+            commands::path_is_dir,
         ])
         .setup(|app| {
             // 系统托盘：常驻状态菜单
@@ -98,6 +104,16 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
+                // 首次进托盘时轻提示一次，避免用户误以为程序已退出
+                if !TRAY_HINT_SHOWN.swap(true, Ordering::SeqCst) {
+                    let _ = window
+                        .app_handle()
+                        .notification()
+                        .builder()
+                        .title("Local Service Runner")
+                        .body("窗口已最小化到系统托盘，服务仍在后台受管运行；右键托盘图标可退出应用。")
+                        .show();
+                }
             }
         })
         .build(tauri::generate_context!())

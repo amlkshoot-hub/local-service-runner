@@ -8,14 +8,44 @@
         <span class="app-badge">Spring Boot 管理器</span>
       </div>
       <div class="header-right">
-        <span class="stat-text">
-          共 {{ services.length }} 个服务，{{ runningCount }} 个运行中
-        </span>
-        <button class="btn ghost icon-only-btn" title="导入服务配置（同 id 覆盖，新 id 追加）" @click="importConfig">
-          <AppIcon name="upload" :size="14" />
+        <!-- 状态胶囊：点击联动侧栏过滤 -->
+        <div class="stat-chips">
+          <button
+            :class="['stat-chip', { active: statusFilter === 'all' }]"
+            title="全部服务，点击过滤"
+            @click="setStatusFilter('all')"
+          >
+            全部 <b>{{ services.length }}</b>
+          </button>
+          <button
+            :class="['stat-chip', { active: statusFilter === 'running', ok: true }]"
+            title="运行中服务，点击过滤"
+            @click="setStatusFilter('running')"
+          >
+            <span class="chip-dot ok"></span> 运行中 <b>{{ runningCount }}</b>
+          </button>
+          <button
+            v-if="stoppedCount > 0"
+            :class="['stat-chip', { active: statusFilter === 'stopped' }]"
+            title="已停止服务，点击过滤"
+            @click="setStatusFilter('stopped')"
+          >
+            <span class="chip-dot off"></span> 已停止 <b>{{ stoppedCount }}</b>
+          </button>
+          <button
+            v-if="failedCount > 0"
+            :class="['stat-chip', { active: statusFilter === 'stopped', err: true }]"
+            title="异常退出服务，点击过滤"
+            @click="setStatusFilter('stopped')"
+          >
+            <span class="chip-dot err"></span> 异常 <b>{{ failedCount }}</b>
+          </button>
+        </div>
+        <button class="btn ghost" title="从 JSON 文件导入服务配置（同 id 覆盖，新 id 追加）" @click="importConfig">
+          <AppIcon name="upload" :size="13" /> 导入
         </button>
-        <button class="btn ghost icon-only-btn" title="导出全部服务配置到 JSON 文件" @click="exportConfig">
-          <AppIcon name="download" :size="14" />
+        <button class="btn ghost" title="导出全部服务配置到 JSON 文件" @click="exportConfig">
+          <AppIcon name="download" :size="13" /> 导出
         </button>
         <button class="btn primary add-btn" @click="openAddModal">
           <AppIcon name="plus" :size="14" />
@@ -27,22 +57,62 @@
     <!-- 主工作区：左侧服务列表 + 右侧控制与日志 -->
     <div class="app-workspace">
       <!-- 左侧：服务列表 -->
-      <aside class="services-sidebar">
+      <aside class="services-sidebar" :style="{ width: sidebarWidth + 'px' }">
         <div class="sidebar-search">
           <span class="search-icon"><AppIcon name="search" :size="13" /></span>
           <input
+            ref="sidebarSearchRef"
             v-model="serviceSearch"
             type="text"
-            placeholder="过滤服务..."
+            placeholder="过滤服务 (Ctrl+K)…"
             class="search-input"
           />
         </div>
 
+        <!-- 快捷筛选 + 分组折叠 + 聚合入口 -->
+        <div class="sidebar-quickbar">
+          <div class="quick-chips">
+            <button
+              v-for="f in [
+                { key: 'all', label: '全部' },
+                { key: 'running', label: '运行中' },
+                { key: 'stopped', label: '已停止' },
+              ]"
+              :key="f.key"
+              :class="['quick-chip', { active: statusFilter === f.key }]"
+              @click="setStatusFilter(f.key as any)"
+            >
+              {{ f.label }}
+            </button>
+          </div>
+          <button
+            class="quickbar-icon-btn"
+            :title="groupsLastCollapseState ? '展开全部分组' : '折叠全部分组'"
+            @click="toggleAllGroups"
+          >
+            <AppIcon :name="groupsLastCollapseState ? 'chevronRight' : 'chevronDown'" :size="13" />
+          </button>
+        </div>
+
+        <!-- 聚合日志常驻入口（无需选中服务即可观测跨服务日志） -->
+        <button
+          :class="['agg-entry', { active: aggregatedView }]"
+          title="同屏观测全部服务的日志流（按时间线合并，带服务色标）"
+          @click="aggregatedView = !aggregatedView"
+        >
+          <AppIcon name="layers" :size="13" />
+          聚合日志流
+          <span class="agg-entry-count">{{ services.length }}</span>
+        </button>
+
         <div class="services-list">
           <div v-for="group in groupedServices" :key="group.name" class="service-group">
             <div class="group-header">
-              <span class="group-name" :title="group.name">{{ group.name }}</span>
-              <span class="group-count">{{ group.items.length }}</span>
+              <span class="group-chevron" @click="toggleGroup(group.name)">
+                <AppIcon :name="isGroupCollapsed(group.name) ? 'chevronRight' : 'chevronDown'" :size="12" />
+              </span>
+              <span class="group-name" :title="group.name" @click="toggleGroup(group.name)">{{ group.name }}</span>
+              <span class="group-count" @click="toggleGroup(group.name)">{{ group.items.length }}</span>
               <span class="group-actions">
                 <button
                   class="group-action-btn"
@@ -61,6 +131,7 @@
               </span>
             </div>
 
+            <template v-if="!isGroupCollapsed(group.name)">
             <div
               v-for="svc in group.items"
               :key="svc.id"
@@ -106,19 +177,27 @@
                 </button>
               </div>
             </div>
+            </template>
           </div>
 
           <div v-if="services.length === 0" class="empty-list-tip">
-            暂无服务配置，点击右上角「添加服务」开始
+            暂无服务
+            <button class="link-btn" @click="openAddModal">立即添加</button>
+          </div>
+          <div v-else-if="filteredServices.length === 0" class="empty-list-tip">
+            没有匹配「{{ statusFilter === 'running' ? '运行中' : statusFilter === 'stopped' ? '已停止' : serviceSearch }}」的服务
           </div>
         </div>
+
+        <!-- 侧栏宽度拖拽手柄 -->
+        <div class="sidebar-resizer" @mousedown="onSidebarResizeStart"></div>
       </aside>
 
       <!-- 右侧：服务主面板 -->
       <main class="main-panel">
-        <div v-if="currentService" class="service-detail">
-          <!-- 服务控制头部 -->
-          <div class="control-header">
+        <div v-if="currentService || aggregatedView" class="service-detail">
+          <!-- 服务控制头部（三段式第 1、2 段） -->
+          <div v-if="currentService" class="control-header">
             <div class="control-header-top">
               <div class="title-section">
                 <div class="service-main-title">
@@ -129,6 +208,18 @@
                       · {{ currentModule }}
                     </template>
                   </span>
+                  <!-- 运行状态 + 健康组合徽章 -->
+                  <span :class="['state-badge', getStatusClass(currentService.id)]">
+                    {{ getStatusText(currentService.id) }}
+                  </span>
+                  <span
+                    v-if="getHealthBadge(currentService.id)"
+                    :class="['task-badge', 'health-badge', getHealthBadge(currentService.id)!.cls]"
+                    title="健康探针：周期性 GET 健康检查端点"
+                  >
+                    <AppIcon name="activity" :size="11" />
+                    {{ getHealthBadge(currentService.id)!.text }}
+                  </span>
                 </div>
                 <div class="service-work-dir" :title="currentService.workDir">
                   <AppIcon name="folder" :size="12" />
@@ -136,25 +227,59 @@
                 </div>
               </div>
 
-              <!-- 右侧编辑/克隆/删除 -->
+              <!-- 右侧：生命周期按钮 + 次级图标操作 -->
               <div class="service-mgmt-btns">
-                <button class="btn ghost sm" @click="openEditModal">
-                  <AppIcon name="edit" :size="12" /> 编辑
+                <div class="action-btn-group">
+                  <button
+                    class="btn primary action-btn"
+                    :disabled="
+                      isRunning(currentService.id) ||
+                      isStarting(currentService.id) ||
+                      isStopping(currentService.id) ||
+                      isBuilding(currentService.id) ||
+                      isMavenTaskRunning(currentService.id)
+                    "
+                    @click="startCurrentService"
+                  >
+                    <AppIcon name="play" :size="12" /> 启动
+                  </button>
+                  <button
+                    class="btn danger action-btn"
+                    :disabled="
+                      !isRunning(currentService.id) &&
+                      !isStarting(currentService.id) &&
+                      !isBuilding(currentService.id)
+                    "
+                    @click="stopCurrentService"
+                  >
+                    <AppIcon name="stop" :size="11" /> 停止
+                  </button>
+                  <button
+                    class="btn secondary action-btn"
+                    :disabled="!isRunning(currentService.id) && !isBuilding(currentService.id)"
+                    @click="restartCurrentService"
+                  >
+                    <AppIcon name="restart" :size="13" /> 重启
+                  </button>
+                </div>
+                <span class="mgmt-divider"></span>
+                <button class="btn ghost sm icon-only-btn" title="编辑服务配置" @click="openEditModal">
+                  <AppIcon name="edit" :size="13" />
                 </button>
-                <button class="btn ghost sm" title="克隆服务配置（起多实例调试）" @click="cloneCurrentService">
-                  <AppIcon name="copy" :size="12" /> 克隆
+                <button class="btn ghost sm icon-only-btn" title="克隆服务（起多实例调试）" @click="cloneCurrentService">
+                  <AppIcon name="copy" :size="13" />
                 </button>
-                <button class="btn ghost danger-ghost sm" @click="confirmDeleteService">
-                  <AppIcon name="trash" :size="12" /> 删除
+                <button class="btn ghost danger-ghost sm icon-only-btn" title="删除服务" @click="confirmDeleteService">
+                  <AppIcon name="trash" :size="13" />
                 </button>
               </div>
             </div>
 
-            <!-- Profile 选择与操作栏 -->
+            <!-- 次级信息与工具条（三段式第 2 段） -->
             <div class="control-header-bottom">
               <!-- 当前实际运行 Profile -->
               <div class="profile-box">
-                <span class="box-label">实际运行 Profile:</span>
+                <span class="box-label">运行 Profile</span>
                 <span :class="['active-profile-badge', { running: isRunning(currentService.id) }]">
                   {{ getActiveProfileDisplay(currentService.id) }}
                 </span>
@@ -162,7 +287,7 @@
 
               <!-- 下次生效 Profile 选择/输入框 -->
               <div class="profile-box next-profile-box">
-                <span class="box-label">下次启动 Profile:</span>
+                <span class="box-label">下次启动</span>
                 <div class="profile-selector-wrap">
                   <select
                     v-model="profileSelectValue"
@@ -177,7 +302,7 @@
                     >
                       {{ p }}
                     </option>
-                    <option value="custom">自定义多配置...</option>
+                    <option value="custom">自定义多配置…</option>
                   </select>
                   <input
                     v-if="isCustomProfileInput"
@@ -188,114 +313,27 @@
                     @blur="onCustomProfileBlur"
                   />
                 </div>
-                <span class="profile-notice" title="运行中修改只在下一次启动或重启生效">
-                  (下次生效)
-                </span>
-              </div>
-
-              <!-- 操作按钮组 -->
-              <div class="action-btn-group">
-                <button
-                  class="btn primary action-btn"
-                  :disabled="
-                    isRunning(currentService.id) ||
-                    isStarting(currentService.id) ||
-                    isStopping(currentService.id) ||
-                    isBuilding(currentService.id) ||
-                    isMavenTaskRunning(currentService.id)
-                  "
-                  @click="startCurrentService"
-                >
-                  <AppIcon name="play" :size="12" /> 启动
-                </button>
-                <button
-                  class="btn danger action-btn"
-                  :disabled="
-                    !isRunning(currentService.id) &&
-                    !isStarting(currentService.id) &&
-                    !isBuilding(currentService.id)
-                  "
-                  @click="stopCurrentService"
-                >
-                  <AppIcon name="stop" :size="11" /> 停止
-                </button>
-                <button
-                  class="btn secondary action-btn"
-                  :disabled="!isRunning(currentService.id) && !isBuilding(currentService.id)"
-                  @click="restartCurrentService"
-                >
-                  <AppIcon name="restart" :size="13" /> 重启
-                </button>
-              </div>
-
-              <!-- Maven 工具箱 + 项目终端 -->
-              <div class="maven-toolbox">
-                <button
-                  class="btn ghost action-btn terminal-btn"
-                  title="在项目目录唤起终端（Windows Terminal / cmd）"
-                  @click="openTerminal"
-                >
-                  <AppIcon name="terminal" :size="13" /> 终端
-                </button>
-                <template v-if="isMavenLaunchType">
-                  <template v-if="!isMavenTaskRunning(currentService.id)">
-                    <button
-                      class="btn ghost action-btn mvn-btn"
-                      :disabled="!canRunMavenTask"
-                      title="mvn clean：清理工程 target 目录"
-                      @click="runMavenTask('clean')"
-                    >
-                      Clean
-                    </button>
-                    <button
-                      class="btn ghost action-btn mvn-btn"
-                      :disabled="!canRunMavenTask"
-                      title="mvn compile：增量编译工程"
-                      @click="runMavenTask('compile')"
-                    >
-                      Compile
-                    </button>
-                    <button
-                      class="btn ghost action-btn mvn-btn"
-                      :disabled="!canRunMavenTask"
-                      title="mvn package：打包全工程（不运行服务）"
-                      @click="runMavenTask('package')"
-                    >
-                      Package
-                    </button>
-                    <button
-                      class="btn ghost action-btn mvn-btn"
-                      :disabled="!canRunMavenTask"
-                      title="mvn install：构建并安装到本地仓库"
-                      @click="runMavenTask('install')"
-                    >
-                      Install
-                    </button>
-                  </template>
-                  <template v-else>
-                    <span class="task-badge running">
-                      <span class="spinner"></span>
-                      mvn {{ getMavenTaskGoal(currentService.id) }} 构建中...
-                    </span>
-                    <button class="btn danger action-btn" @click="stopMavenTask">
-                      <AppIcon name="stop" :size="11" /> 停止构建
-                    </button>
-                  </template>
-                </template>
-              </div>
-
-              <!-- 状态与 PID -->
-              <div class="status-summary">
-                <span v-if="mavenTaskBadge" :class="['task-badge', mavenTaskBadge.cls]">
-                  {{ mavenTaskBadge.text }}
-                </span>
                 <span
-                  v-if="getHealthBadge(currentService.id)"
-                  :class="['task-badge', 'health-badge', getHealthBadge(currentService.id)!.cls]"
-                  title="健康探针：周期性 GET 健康检查端点"
+                  v-if="profilePendingRestart"
+                  class="pending-restart-badge"
+                  title="下次启动的 Profile 与当前运行不一致，重启后生效"
                 >
-                  <AppIcon name="activity" :size="11" />
-                  {{ getHealthBadge(currentService.id)!.text }}
+                  ● 重启生效
+                </span>
+              </div>
+
+              <!-- 运行态遥测：端口（可点击打开浏览器）+ PID + 指标 -->
+              <div class="telemetry-box">
+                <button
+                  v-if="currentService.port"
+                  class="telemetry-chip clickable"
+                  title="在浏览器打开 http://127.0.0.1:{{ currentService.port }}"
+                  @click="openServiceUrl(currentService.port)"
+                >
+                  <AppIcon name="externalLink" :size="11" /> :{{ currentService.port }}
+                </button>
+                <span v-if="getPid(currentService.id)" class="telemetry-chip">
+                  PID {{ getPid(currentService.id) }}
                 </span>
                 <div v-if="currentMetrics" class="metrics-box" title="进程树实时占用（每 2s 采样）">
                   <svg class="spark" width="72" height="18" viewBox="0 0 72 18" preserveAspectRatio="none">
@@ -310,12 +348,51 @@
                   <span class="metrics-text">
                     CPU {{ currentMetrics.cpuPercent !== null ? currentMetrics.cpuPercent.toFixed(1) : '—' }}%
                     · {{ currentMetrics.memoryMb }} MB
-                    · {{ currentMetrics.processCount }}P
+                    · {{ currentMetrics.processCount }} 进程
                   </span>
                 </div>
-                <span class="state-label">{{ getStatusText(currentService.id) }}</span>
-                <span v-if="getPid(currentService.id)" class="pid-tag">
-                  PID: {{ getPid(currentService.id) }}
+              </div>
+
+              <!-- Maven 工具箱 + 项目终端 -->
+              <div class="maven-toolbox">
+                <button
+                  class="btn ghost action-btn terminal-btn"
+                  title="在项目目录唤起终端（Windows Terminal / cmd）"
+                  @click="openTerminal"
+                >
+                  <AppIcon name="terminal" :size="13" /> 终端
+                </button>
+                <template v-if="isMavenLaunchType">
+                  <template v-if="!isMavenTaskRunning(currentService.id)">
+                    <div class="mvn-segment">
+                      <button
+                        v-for="g in ['clean', 'compile', 'package', 'install']"
+                        :key="g"
+                        class="mvn-seg-btn"
+                        :disabled="!canRunMavenTask"
+                        :title="
+                          canRunMavenTask
+                            ? `mvn ${g}（全工程构建，输出进日志视窗）`
+                            : '服务运行中或构建进行中，请先停止后再执行构建'
+                        "
+                        @click="runMavenTask(g)"
+                      >
+                        {{ g }}
+                      </button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <span class="task-badge running">
+                      <span class="spinner"></span>
+                      mvn {{ getMavenTaskGoal(currentService.id) }} 构建中…
+                    </span>
+                    <button class="btn danger action-btn" @click="stopMavenTask">
+                      <AppIcon name="stop" :size="11" /> 停止构建
+                    </button>
+                  </template>
+                </template>
+                <span v-if="mavenTaskBadge" :class="['task-badge', mavenTaskBadge.cls]">
+                  {{ mavenTaskBadge.text }}
                 </span>
               </div>
             </div>
@@ -326,7 +403,7 @@
             <div class="console-toolbar">
               <div class="toolbar-left">
                 <span class="console-title"><AppIcon name="terminal" :size="13" /> 实时控制台</span>
-                <div v-if="services.length > 1" class="view-switch">
+                <div v-if="currentService && services.length > 1" class="view-switch">
                   <button
                     :class="['view-switch-btn', { active: !aggregatedView }]"
                     @click="aggregatedView = false"
@@ -340,29 +417,43 @@
                     聚合全部
                   </button>
                 </div>
-                <span v-if="aggregatedView" class="log-count">{{ services.length }} 服务</span>
-                <span class="log-count">{{ filteredLogs.length }} 行</span>
+                <div v-if="!currentService" class="console-title-sub">全部服务聚合视图</div>
+                <!-- 日志级别快速过滤胶囊 -->
+                <div class="level-switch">
+                  <button
+                    v-for="lv in ['ALL', 'INFO', 'WARN', 'ERROR']"
+                    :key="lv"
+                    :class="['level-chip', lv.toLowerCase(), { active: levelFilter === lv }]"
+                    @click="levelFilter = levelFilter === lv ? 'ALL' : (lv as any)"
+                  >
+                    {{ lv }}
+                  </button>
+                </div>
+                <span class="log-count">{{ logMatchCount }}</span>
+                <span v-if="aggregatedView" class="log-count">· {{ services.length }} 服务</span>
               </div>
               <div class="toolbar-right">
                 <div class="log-filter-wrap">
                   <span class="log-filter-icon"><AppIcon name="filter" :size="12" /></span>
                   <input
+                    ref="logFilterRef"
                     v-model="logFilter"
                     type="text"
-                    placeholder="过滤日志..."
+                    placeholder="搜日志 (Ctrl+F)…"
                     class="log-filter-input"
                   />
                 </div>
-                <label class="auto-scroll-label">
+                <label class="auto-scroll-label" title="新日志自动滚动到底部；上翻历史时自动暂停">
                   <span class="checkbox-fake"><AppIcon name="check" :size="10" :stroke-width="3" /></span>
                   <input type="checkbox" v-model="autoScroll" />
                   自动滚屏
                 </label>
                 <button class="btn ghost sm" @click="clearLogs">
                   <AppIcon name="trash" :size="12" /> 清空
-                </button>                <button class="btn ghost sm" @click="copyLogs">
+                </button>
+                <button class="btn ghost sm" @click="copyLogs">
                   <AppIcon name="copy" :size="12" />
-                  {{ copyTip || '复制全部' }}
+                  {{ copyTip || '复制' }}
                 </button>
               </div>
             </div>
@@ -387,15 +478,70 @@
                 <span class="log-content">{{ log.content }}</span>
               </div>
               <div v-if="filteredLogs.length === 0" class="empty-log-tip">
-                {{ logFilter ? '未匹配到包含搜索词的日志' : '等待服务启动或输出日志...' }}
+                {{
+                  logFilter || levelFilter !== 'ALL'
+                    ? '未匹配到符合过滤条件的日志'
+                    : '等待服务启动或输出日志…'
+                }}
               </div>
+
+              <!-- 脱底后回到底部悬浮胶囊 -->
+              <button
+                v-if="!autoScroll && pendingLogCount > 0"
+                class="jump-bottom-pill"
+                @click="jumpToBottom"
+              >
+                <AppIcon name="arrowDown" :size="12" />
+                回到底部（{{ pendingLogCount }} 条新日志）
+              </button>
             </div>
           </div>
         </div>
 
+        <!-- 冷启动引导页：无服务且未开聚合视图 -->
         <div v-else class="empty-state">
-          <AppIcon name="layers" :size="34" :stroke-width="1.3" class="empty-icon" />
-          <div class="empty-title">请在左侧选择一个服务，或添加新服务</div>
+          <div class="empty-hero">
+            <div class="empty-hero-icon">
+              <AppIcon name="bolt" :size="26" :stroke-width="1.8" />
+            </div>
+            <div class="empty-title">欢迎使用 Local Service Runner</div>
+            <div class="empty-subtitle">把 Spring Boot 服务收进一个窗口：启动、停止、Profile 切换与实时日志</div>
+          </div>
+
+          <div class="empty-actions">
+            <button class="btn primary empty-primary-btn" @click="openAddModal">
+              <AppIcon name="plus" :size="14" /> 添加第一个服务
+            </button>
+            <button class="btn secondary" @click="importConfig">
+              <AppIcon name="upload" :size="13" /> 导入配置文件 (JSON)
+            </button>
+          </div>
+
+          <div :class="['empty-dropzone', { over: dragOver }]">
+            <AppIcon name="folder" :size="22" :stroke-width="1.5" />
+            <div class="dropzone-text">
+              将 Spring Boot / Maven 项目文件夹拖到此处
+              <span class="dropzone-sub">自动识别模块与 Profile，直接预填配置</span>
+            </div>
+          </div>
+
+          <div class="empty-features">
+            <div class="feature-card">
+              <AppIcon name="shield" :size="16" />
+              <div class="feature-title">进程树精准回收</div>
+              <div class="feature-desc">Job Object 内核级治理，不留孤儿进程</div>
+            </div>
+            <div class="feature-card">
+              <AppIcon name="sliders" :size="16" />
+              <div class="feature-title">多 Profile 独立切换</div>
+              <div class="feature-desc">运行/待生效解耦，重启即生效</div>
+            </div>
+            <div class="feature-card">
+              <AppIcon name="package" :size="16" />
+              <div class="feature-title">内置 Maven 工具箱</div>
+              <div class="feature-desc">clean / compile / package / install 一键直达</div>
+            </div>
+          </div>
         </div>
       </main>
     </div>
@@ -405,16 +551,18 @@
       :is-open="isModalOpen"
       :service-data="editingService"
       :existing-groups="allGroupNames"
-      @close="isModalOpen = false"
+      :initial-work-dir="pendingWorkDir"
+      @close="onModalClosed"
       @saved="onServiceSaved"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import ServiceModal from './components/ServiceModal.vue';
 import AppIcon from './components/AppIcon.vue';
 import type {
@@ -436,6 +584,29 @@ import type {
 const services = ref<ServiceConfig[]>([]);
 const currentService = ref<ServiceConfig | null>(null);
 const serviceSearch = ref('');
+
+// 侧栏状态快捷筛选（全部 / 运行中 / 已停止）与顶栏胶囊联动
+const statusFilter = ref<'all' | 'running' | 'stopped'>('all');
+
+// 分组折叠：记录被折叠的分组名
+const collapsedGroups = ref<Set<string>>(new Set());
+
+// 侧栏宽度拖拽（220 ~ 400px，localStorage 持久化）
+const SIDEBAR_W_KEY = 'lsr-sidebar-width';
+const sidebarWidth = ref<number>(
+  Math.min(400, Math.max(220, Number(localStorage.getItem(SIDEBAR_W_KEY)) || 282))
+);
+let sidebarResizing = false;
+
+// 日志级别过滤（ALL / INFO / WARN / ERROR）
+const levelFilter = ref<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
+
+// 脱底后新增日志计数（回到底部胶囊用）
+const pendingLogCount = ref(0);
+
+// 拖拽项目文件夹建服务：拖拽悬停高亮 + 预填目录
+const dragOver = ref(false);
+const pendingWorkDir = ref('');
 
 // 状态字典：serviceId -> ServiceStatus
 const statusMap = ref<Record<string, ServiceStatus>>({});
@@ -479,12 +650,26 @@ const runningCount = computed(() => {
   return Object.values(statusMap.value).filter((s) => s.type === 'running').length;
 });
 
+const failedCount = computed(() => {
+  return Object.values(statusMap.value).filter((s) => s.type === 'failed').length;
+});
+
+const stoppedCount = computed(
+  () => services.value.length - runningCount.value - failedCount.value
+);
+
 const filteredServices = computed(() => {
-  if (!serviceSearch.value.trim()) return services.value;
-  const q = serviceSearch.value.toLowerCase();
-  return services.value.filter(
-    (s) => s.name.toLowerCase().includes(q) || s.workDir.toLowerCase().includes(q)
-  );
+  const q = serviceSearch.value.trim().toLowerCase();
+  return services.value.filter((s) => {
+    if (q && !(s.name.toLowerCase().includes(q) || s.workDir.toLowerCase().includes(q))) {
+      return false;
+    }
+    const status = statusMap.value[s.id];
+    const type = status?.type || 'stopped';
+    if (statusFilter.value === 'running') return type === 'running' || type === 'starting' || type === 'building';
+    if (statusFilter.value === 'stopped') return type === 'stopped' || type === 'failed';
+    return true;
+  });
 });
 
 const currentLogs = computed(() => {
@@ -512,14 +697,34 @@ const viewLogs = computed<Array<LogEntry & { svcId?: string; svcName?: string }>
 });
 
 const filteredLogs = computed(() => {
-  const all = viewLogs.value;
-  if (!logFilter.value.trim()) return all;
-  const q = logFilter.value.toLowerCase();
+  let all: Array<LogEntry & { svcId?: string; svcName?: string }> = viewLogs.value;
+  // 级别过滤胶囊（ALL / INFO / WARN / ERROR）
+  if (levelFilter.value !== 'ALL') {
+    const lv = levelFilter.value;
+    all = all.filter((l) => l.level === lv);
+  }
+  const q = logFilter.value.trim().toLowerCase();
+  if (!q) return all;
   return all.filter(
     (l) =>
       l.content.toLowerCase().includes(q) ||
       (l.svcName || '').toLowerCase().includes(q)
   );
+});
+
+// 日志匹配计数（x/y）
+const logMatchCount = computed(() => `${filteredLogs.value.length}/${viewLogs.value.length}`);
+
+// 待生效 Profile 与运行中不一致 → 琥珀色「重启生效」提示
+const profilePendingRestart = computed(() => {
+  if (!currentService.value) return false;
+  const status = statusMap.value[currentService.value.id];
+  if (!status || status.type !== 'running') return false;
+  const next = (currentService.value.selectedProfiles || [])
+    .map((p) => p.trim())
+    .filter((p) => p && p.toLowerCase() !== 'default');
+  const running = status.activeProfiles || [];
+  return next.join(',') !== running.join(',');
 });
 
 // 侧栏分组视图：按 group 字段分节，「未分组」排在最后
@@ -624,8 +829,13 @@ onMounted(async () => {
     }
     list.push(entry);
 
-    if (currentService.value?.id === serviceId && autoScroll.value) {
+    const visible = aggregatedView.value || currentService.value?.id === serviceId;
+    if (!visible) return;
+    if (autoScroll.value) {
       scrollToBottom();
+    } else {
+      // 用户在翻阅历史日志：暂停滚底并计数新日志
+      pendingLogCount.value += 1;
     }
   });
 
@@ -653,7 +863,149 @@ onMounted(async () => {
     const { serviceId, health } = event.payload;
     healthMap.value[serviceId] = health;
   });
+
+  // 拖拽项目文件夹快速创建服务（仅 Tauri WebView 环境可用）
+  try {
+    const webview = getCurrentWebview();
+    await webview.onDragDropEvent((event) => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        dragOver.value = true;
+      } else {
+        dragOver.value = false;
+      }
+      if (event.payload.type === 'drop') {
+        const paths = (event.payload as { paths: string[] }).paths || [];
+        if (paths.length === 1) handleFolderDrop(paths[0]);
+      }
+    });
+  } catch (err) {
+    console.info('Drag-drop not available (browser preview):', err);
+  }
+
+  // 全局快捷键
+  window.addEventListener('keydown', onGlobalKeydown);
 });
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown);
+  if (metricsTimer !== null) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+});
+
+/** 全局快捷键：Ctrl+K 过滤 / Ctrl+N 新建 / Ctrl+R 重启 / Ctrl+L 清空日志 / Ctrl+F 搜日志 */
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const key = e.key.toLowerCase();
+  if (key === 'k') {
+    e.preventDefault();
+    sidebarSearchRef.value?.focus();
+    sidebarSearchRef.value?.select();
+  } else if (key === 'n') {
+    e.preventDefault();
+    if (!isModalOpen.value) openAddModal();
+  } else if (key === 'r') {
+    if (currentService.value && isRunning(currentService.value.id)) {
+      e.preventDefault();
+      restartCurrentService();
+    }
+  } else if (key === 'l') {
+    e.preventDefault();
+    clearLogs();
+  } else if (key === 'f') {
+    e.preventDefault();
+    logFilterRef.value?.focus();
+    logFilterRef.value?.select();
+  }
+}
+
+const sidebarSearchRef = ref<HTMLInputElement | null>(null);
+const logFilterRef = ref<HTMLInputElement | null>(null);
+
+/** 拖入项目文件夹 → 校验目录后弹新建弹窗并预填路径 */
+async function handleFolderDrop(path: string) {
+  try {
+    const isDir = await invoke<boolean>('path_is_dir', { path });
+    if (!isDir) {
+      alert('拖入的不是文件夹，请拖拽 Spring Boot / Maven 项目目录');
+      return;
+    }
+    pendingWorkDir.value = path;
+    openAddModal();
+  } catch (err: any) {
+    console.error('handleFolderDrop failed:', err);
+  }
+}
+
+/** 侧栏宽度拖拽 */
+function onSidebarResizeStart(e: MouseEvent) {
+  sidebarResizing = true;
+  e.preventDefault();
+}
+function onGlobalMouseMove(e: MouseEvent) {
+  if (!sidebarResizing) return;
+  const w = Math.min(400, Math.max(220, e.clientX));
+  sidebarWidth.value = w;
+}
+function onGlobalMouseUp() {
+  if (!sidebarResizing) return;
+  sidebarResizing = false;
+  localStorage.setItem(SIDEBAR_W_KEY, String(sidebarWidth.value));
+}
+
+// 挂载期常驻监听拖拽调宽（document 级别）
+if (typeof document !== 'undefined') {
+  document.addEventListener('mousemove', onGlobalMouseMove);
+  document.addEventListener('mouseup', onGlobalMouseUp);
+}
+
+/** 分组折叠/展开 */
+function toggleGroup(name: string) {
+  const set = new Set(collapsedGroups.value);
+  if (set.has(name)) set.delete(name);
+  else set.add(name);
+  collapsedGroups.value = set;
+}
+
+function isGroupCollapsed(name: string): boolean {
+  return collapsedGroups.value.has(name);
+}
+
+/** 一键折叠/展开全部分组 */
+let groupsLastCollapseState = false;
+function toggleAllGroups() {
+  const allCollapsed = groupedServices.value.every((g) => collapsedGroups.value.has(g.name));
+  if (allCollapsed && groupedServices.value.length > 0) {
+    collapsedGroups.value = new Set();
+    groupsLastCollapseState = false;
+  } else {
+    collapsedGroups.value = new Set(groupedServices.value.map((g) => g.name));
+    groupsLastCollapseState = true;
+  }
+}
+
+/** 侧栏无服务时的单行轻提示（带一键新建） */
+function setStatusFilter(f: 'all' | 'running' | 'stopped') {
+  statusFilter.value = statusFilter.value === f ? 'all' : f;
+}
+
+/** 点端口徽章 → 浏览器打开 http://127.0.0.1:{port} */
+async function openServiceUrl(port?: number) {
+  if (!port) return;
+  try {
+    await invoke('open_url', { url: `http://127.0.0.1:${port}` });
+  } catch (err: any) {
+    alert('打开浏览器失败: ' + (err?.message || err));
+  }
+}
+
+/** 回到底部（悬浮胶囊） */
+function jumpToBottom() {
+  autoScroll.value = true;
+  pendingLogCount.value = 0;
+  scrollToBottom();
+}
 
 async function loadServices() {
   try {
@@ -1070,8 +1422,14 @@ function openAddModal() {
   isModalOpen.value = true;
 }
 
+function onModalClosed() {
+  isModalOpen.value = false;
+  pendingWorkDir.value = '';
+}
+
 function openEditModal() {
   if (!currentService.value) return;
+  pendingWorkDir.value = '';
   editingService.value = JSON.parse(JSON.stringify(currentService.value));
   isModalOpen.value = true;
 }
@@ -1140,6 +1498,9 @@ function onScroll() {
   const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
   if (isAtBottom) {
     autoScroll.value = true;
+    pendingLogCount.value = 0;
+  } else {
+    autoScroll.value = false; // 用户上翻历史：自动暂停滚底
   }
 }
 
@@ -1162,44 +1523,44 @@ function formatLevel(level: string) {
 </script>
 
 <style>
-/* ============ 设计令牌（全局共享，ServiceModal 同样使用） ============ */
+/* ============ 浅色主题设计令牌（全局共享，ServiceModal 同样使用） ============ */
 :root {
-  /* 深空蓝黑底色系 */
-  --bg-deep: #070b14;
-  --bg-base: #0b1120;
-  --bg-panel: #0e1626;
-  --bg-card: #131d30;
-  --bg-elevated: #1a2740;
-  --bg-input: #0b1424;
-  --bg-console: #080d18;
+  /* 三层明度阶梯：画布最亮 / 侧栏次之 / 顶栏毛玻璃白 */
+  --bg-base: #eef1f7;
+  --bg-panel: #f7f9fc;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #f1f4f9;
+  --bg-console: #ffffff;
+  --bg-hover: rgba(23, 32, 51, 0.045);
 
-  /* 靛紫强调 */
-  --accent: #6366f1;
-  --accent-soft: #a5b4fc;
-  --accent-grad: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  /* 淡蓝主色 */
+  --accent: #4f7cf9;
+  --accent-deep: #3a63e8;
+  --accent-text: #3a56d4;
+  --accent-grad: linear-gradient(135deg, #4f7cf9 0%, #6a67f7 100%);
 
-  /* 状态色 */
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --danger: #f87171;
-  --info: #60a5fa;
+  /* 状态色（浅底深化前景） */
+  --ok: #16a34a;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --info: #2563eb;
 
-  /* 文本层次 */
-  --text-1: #e6edf6;
-  --text-2: #98a6bd;
-  --text-3: #5f6e85;
+  /* 文本层次（WCAG AA） */
+  --text-1: #1b2434;
+  --text-2: #52607a;
+  --text-3: #7c8798;
 
   /* 边框层次 */
-  --line-1: rgba(148, 163, 184, 0.1);
-  --line-2: rgba(148, 163, 184, 0.18);
-  --line-accent: rgba(99, 102, 241, 0.45);
+  --line-1: rgba(23, 32, 51, 0.08);
+  --line-2: rgba(23, 32, 51, 0.14);
 
   /* 圆角 */
   --r-sm: 6px;
   --r-md: 9px;
   --r-lg: 14px;
 
-  --shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 16px 44px rgba(23, 32, 51, 0.18);
   --font-mono: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
 }
 
@@ -1216,10 +1577,11 @@ body {
   overflow: hidden;
   font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 13px;
-  background: var(--bg-deep);
+  background: var(--bg-base);
   color: var(--text-1);
   user-select: none;
   -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums; /* 数字等宽，采样值不抖动 */
 }
 
 #app {
@@ -1233,17 +1595,21 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.22);
+  background: rgba(23, 32, 51, 0.18);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.4);
+  background: rgba(23, 32, 51, 0.32);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+::selection {
+  background: rgba(79, 124, 249, 0.22);
 }
 </style>
 
@@ -1255,8 +1621,8 @@ body {
   width: 100vw;
   height: 100vh;
   background:
-    radial-gradient(1100px 500px at 85% -10%, rgba(99, 102, 241, 0.09), transparent 60%),
-    radial-gradient(900px 420px at -10% 110%, rgba(139, 92, 246, 0.07), transparent 60%),
+    radial-gradient(1100px 500px at 88% -12%, rgba(79, 124, 249, 0.07), transparent 60%),
+    radial-gradient(900px 420px at -8% 112%, rgba(106, 103, 247, 0.06), transparent 60%),
     var(--bg-base);
 }
 
@@ -1266,17 +1632,18 @@ body {
   overflow: hidden;
 }
 
-/* ============ 顶部应用栏（毛玻璃） ============ */
+/* ============ 顶部应用栏（毛玻璃白） ============ */
 .app-header {
   height: 48px;
-  background: rgba(14, 22, 38, 0.72);
+  background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--line-1);
+  border-bottom: 1px solid var(--line-2);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 18px;
   flex-shrink: 0;
+  z-index: 10;
 }
 
 .header-left {
@@ -1294,14 +1661,14 @@ body {
   border-radius: var(--r-md);
   background: var(--accent-grad);
   color: #fff;
-  box-shadow: 0 2px 14px rgba(99, 102, 241, 0.45);
+  box-shadow: 0 2px 10px rgba(79, 124, 249, 0.4);
 }
 
 .app-title {
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.2px;
-  background: linear-gradient(90deg, #e6edf6 20%, var(--accent-soft));
+  background: linear-gradient(90deg, #232f4b 20%, #4f7cf9);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -1309,37 +1676,112 @@ body {
 
 .app-badge {
   font-size: 10.5px;
-  color: var(--text-2);
-  background: rgba(148, 163, 184, 0.1);
-  border: 1px solid var(--line-1);
-  padding: 2px 8px;
+  color: var(--accent-text);
+  background: rgba(79, 124, 249, 0.1);
+  padding: 2px 9px;
   border-radius: 20px;
   letter-spacing: 0.3px;
+  font-weight: 500;
 }
 
 .header-right {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
-.stat-text {
-  font-size: 12px;
-  color: var(--text-3);
+/* 状态统计胶囊（可点击联动过滤） */
+.stat-chips {
+  display: inline-flex;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.stat-chip b {
+  font-weight: 700;
+  color: var(--text-1);
+}
+.stat-chip:hover {
+  color: var(--text-1);
+}
+.stat-chip.active {
+  background: #fff;
+  color: var(--accent-text);
+  box-shadow: 0 1px 4px rgba(23, 32, 51, 0.1);
+}
+.stat-chip.active b {
+  color: var(--accent-text);
+}
+.stat-chip.active.ok b {
+  color: var(--ok);
+}
+.stat-chip.active.err b {
+  color: var(--danger);
+}
+
+.chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.chip-dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 5px rgba(22, 163, 74, 0.5);
+}
+.chip-dot.off {
+  background: #9aa6b8;
+}
+.chip-dot.err {
+  background: var(--danger);
+  box-shadow: 0 0 5px rgba(220, 38, 38, 0.5);
 }
 
 /* ============ 左侧服务列表 ============ */
 .services-sidebar {
-  width: 282px;
+  position: relative;
   background: var(--bg-panel);
-  border-right: 1px solid var(--line-1);
+  border-right: 1px solid var(--line-2);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  min-width: 220px;
+  max-width: 400px;
+}
+
+/* 宽度拖拽手柄 */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+.sidebar-resizer:hover {
+  background: rgba(79, 124, 249, 0.25);
 }
 
 .sidebar-search {
-  padding: 12px 14px 10px;
+  padding: 12px 14px 8px;
   position: relative;
 }
 
@@ -1355,8 +1797,8 @@ body {
 
 .search-input {
   width: 100%;
-  background: var(--bg-input);
-  border: 1px solid var(--line-1);
+  background: #fff;
+  border: 1px solid var(--line-2);
   color: var(--text-1);
   font-size: 12px;
   padding: 8px 10px 8px 32px;
@@ -1366,17 +1808,194 @@ body {
   font-family: inherit;
 }
 .search-input:focus {
-  border-color: var(--line-accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 124, 249, 0.14);
+}
+
+/* 快捷筛选行 */
+.sidebar-quickbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 8px;
+  gap: 6px;
+}
+
+.quick-chips {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.quick-chip {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  background: var(--bg-input);
+  color: var(--text-2);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+.quick-chip:hover {
+  color: var(--text-1);
+  border-color: var(--line-2);
+}
+.quick-chip.active {
+  background: rgba(79, 124, 249, 0.12);
+  color: var(--accent-text);
+  font-weight: 600;
+  border-color: rgba(79, 124, 249, 0.3);
+}
+
+.quickbar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.quickbar-icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
+
+/* 聚合日志常驻入口 */
+.agg-entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 14px 8px;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-2);
+  background: #fff;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.agg-entry:hover {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.agg-entry.active {
+  background: rgba(79, 124, 249, 0.1);
+  border-color: rgba(79, 124, 249, 0.45);
+  color: var(--accent-text);
+}
+
+.agg-entry-count {
+  margin-left: auto;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: #fff;
+  border: 1px solid var(--line-2);
+  color: var(--text-2);
+  padding: 0 7px;
+  border-radius: 10px;
 }
 
 .services-list {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 10px 12px;
+  padding: 2px 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* 服务分组 */
+.service-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px 4px;
+  user-select: none;
+}
+
+.group-chevron {
+  display: inline-flex;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px;
+}
+.group-chevron:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
+}
+
+.group-name {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  max-width: 140px;
+}
+
+.group-count {
+  font-size: 9.5px;
+  color: var(--text-2);
+  background: var(--bg-input);
+  padding: 0 6px;
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+.group-actions {
+  display: inline-flex;
+  gap: 1px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.service-group:hover .group-actions {
+  opacity: 1;
+}
+
+.group-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border: none;
+  background: none;
+  border-radius: 5px;
+  color: var(--ok);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.group-action-btn:hover {
+  background: rgba(22, 163, 74, 0.12);
+}
+.group-action-btn.stop {
+  color: var(--danger);
+}
+.group-action-btn.stop:hover {
+  background: rgba(220, 38, 38, 0.1);
 }
 
 /* 服务卡片 */
@@ -1384,25 +2003,27 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 9px 11px;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
   position: relative;
-  transition: all 0.16s ease;
+  background: transparent;
+  transition: all 0.15s ease;
 }
 .service-item:hover {
-  background: rgba(148, 163, 184, 0.06);
+  background: #fff;
   border-color: var(--line-1);
+  box-shadow: 0 1px 5px rgba(23, 32, 51, 0.06);
 }
 .service-item.active {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.16), rgba(139, 92, 246, 0.05));
-  border-color: rgba(99, 102, 241, 0.32);
+  background: rgba(79, 124, 249, 0.08);
+  border-color: rgba(79, 124, 249, 0.35);
 }
 .service-item.active::before {
   content: '';
   position: absolute;
-  left: 0;
+  left: -1px;
   top: 20%;
   bottom: 20%;
   width: 3px;
@@ -1416,24 +2037,24 @@ body {
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-  background: var(--text-3);
+  background: #a8b2c4;
 }
 .status-dot.starting,
 .status-dot.stopping {
-  background: var(--warn);
-  box-shadow: 0 0 6px rgba(251, 191, 36, 0.6);
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.45);
   animation: pulse-dot 2.4s ease-in-out infinite;
 }
 .status-dot.stopped {
-  background: #475569;
+  background: #b3bccb;
 }
 .status-dot.failed {
   background: var(--danger);
-  box-shadow: 0 0 8px rgba(248, 113, 113, 0.55);
+  box-shadow: 0 0 7px rgba(220, 38, 38, 0.4);
 }
 .status-dot.running {
   background: var(--ok);
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.65);
+  box-shadow: 0 0 6px rgba(22, 163, 74, 0.45);
   animation: pulse-dot 2s ease-in-out infinite;
 }
 
@@ -1443,7 +2064,7 @@ body {
     opacity: 1;
   }
   50% {
-    opacity: 0.45;
+    opacity: 0.4;
   }
 }
 
@@ -1469,9 +2090,9 @@ body {
 
 .service-port {
   font-size: 10.5px;
-  color: #6ee7b7;
-  background: rgba(52, 211, 153, 0.1);
-  border: 1px solid rgba(52, 211, 153, 0.22);
+  color: #46618a;
+  background: rgba(79, 124, 249, 0.08);
+  border: 1px solid rgba(79, 124, 249, 0.22);
   padding: 0 5px;
   border-radius: 5px;
   font-family: var(--font-mono);
@@ -1487,7 +2108,8 @@ body {
 .type-tag {
   font-size: 10px;
   color: var(--text-2);
-  background: rgba(148, 163, 184, 0.1);
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
   padding: 1px 6px;
   border-radius: 5px;
   white-space: nowrap;
@@ -1495,7 +2117,7 @@ body {
 
 .profile-preview {
   font-size: 10.5px;
-  color: var(--accent-soft);
+  color: var(--accent-text);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -1532,24 +2154,38 @@ body {
   color: var(--ok);
 }
 .start-icon:hover {
-  background: rgba(52, 211, 153, 0.14);
-  border-color: rgba(52, 211, 153, 0.3);
+  background: rgba(22, 163, 74, 0.12);
+  border-color: rgba(22, 163, 74, 0.3);
 }
 
 .stop-icon {
   color: var(--danger);
 }
 .stop-icon:hover {
-  background: rgba(248, 113, 113, 0.14);
-  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.28);
 }
 
 .empty-list-tip {
-  padding: 28px 16px;
+  padding: 22px 14px;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-2);
   text-align: center;
   line-height: 1.7;
+}
+
+.link-btn {
+  border: none;
+  background: none;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.link-btn:hover {
+  color: var(--accent-deep);
 }
 
 /* ============ 右侧主面板 ============ */
@@ -1568,14 +2204,14 @@ body {
   overflow: hidden;
 }
 
-/* 控制头部 */
+/* 控制头部（白卡） */
 .control-header {
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--line-1);
-  padding: 16px 20px 13px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--line-2);
+  padding: 14px 20px 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
@@ -1601,17 +2237,42 @@ body {
   align-items: center;
   gap: 10px;
   letter-spacing: 0.2px;
+  flex-wrap: wrap;
 }
 
 .type-pill {
   font-size: 10.5px;
   font-weight: 600;
-  background: rgba(99, 102, 241, 0.14);
-  color: var(--accent-soft);
-  border: 1px solid rgba(99, 102, 241, 0.28);
+  background: rgba(79, 124, 249, 0.09);
+  color: var(--accent-text);
+  border: 1px solid rgba(79, 124, 249, 0.25);
   padding: 2px 9px;
   border-radius: 20px;
   white-space: nowrap;
+}
+
+/* 运行状态徽章 */
+.state-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+  background: var(--bg-input);
+  color: var(--text-2);
+}
+.state-badge.running {
+  background: rgba(22, 163, 74, 0.1);
+  color: var(--ok);
+}
+.state-badge.starting,
+.state-badge.stopping {
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+.state-badge.failed {
+  background: rgba(220, 38, 38, 0.09);
+  color: var(--danger);
 }
 
 .service-work-dir {
@@ -1619,22 +2280,44 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-2);
   max-width: 640px;
 }
 .service-work-dir .app-icon {
   flex-shrink: 0;
+  color: var(--text-3);
 }
 .dir-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 
 .service-mgmt-btns {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.mgmt-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line-2);
+  margin: 0 3px;
+}
+
+.icon-only-btn {
+  padding: 6px 9px !important;
+  height: 30px;
+  box-sizing: border-box;
+}
+
+.action-btn {
+  height: 30px;
+  box-sizing: border-box;
 }
 
 .control-header-bottom {
@@ -1654,7 +2337,7 @@ body {
 
 .box-label {
   font-size: 11.5px;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .active-profile-badge {
@@ -1662,15 +2345,15 @@ body {
   font-family: var(--font-mono);
   padding: 3px 10px;
   border-radius: 20px;
-  background: rgba(148, 163, 184, 0.1);
+  background: var(--bg-input);
   color: var(--text-2);
   font-weight: 600;
   border: 1px solid var(--line-1);
 }
 .active-profile-badge.running {
-  background: rgba(52, 211, 153, 0.12);
+  background: rgba(22, 163, 74, 0.09);
   color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: rgba(22, 163, 74, 0.3);
 }
 
 .profile-selector-wrap {
@@ -1679,8 +2362,8 @@ body {
 }
 
 .profile-select {
-  background: var(--bg-input);
-  border: 1px solid var(--line-1);
+  background: #fff;
+  border: 1px solid var(--line-2);
   color: var(--text-1);
   font-size: 12px;
   padding: 4px 9px;
@@ -1690,13 +2373,13 @@ body {
   transition: all 0.18s ease;
 }
 .profile-select:focus {
-  border-color: var(--line-accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 124, 249, 0.14);
 }
 
 .profile-custom-input {
-  background: var(--bg-input);
-  border: 1px solid var(--line-accent);
+  background: #fff;
+  border: 1px solid var(--accent);
   color: var(--text-1);
   font-size: 12px;
   padding: 4px 9px;
@@ -1706,12 +2389,20 @@ body {
   font-family: var(--font-mono);
 }
 .profile-custom-input:focus {
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  box-shadow: 0 0 0 3px rgba(79, 124, 249, 0.14);
 }
 
-.profile-notice {
+/* 待重启生效徽章 */
+.pending-restart-badge {
   font-size: 10.5px;
-  color: var(--text-3);
+  font-weight: 600;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  padding: 2px 9px;
+  border-radius: 20px;
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* 操作按钮组 */
@@ -1725,27 +2416,98 @@ body {
   font-size: 12px;
 }
 
+/* 运行态遥测 */
+.telemetry-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 13px;
+  border-left: 1px solid var(--line-1);
+}
+
+.telemetry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+  color: var(--text-2);
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+.telemetry-chip.clickable {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.telemetry-chip.clickable:hover {
+  color: var(--accent-text);
+  border-color: rgba(79, 124, 249, 0.4);
+  background: rgba(79, 124, 249, 0.07);
+}
+
+.pid-tag {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  background: rgba(37, 99, 235, 0.07);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  color: var(--info);
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
 /* Maven 工具箱 */
 .maven-toolbox {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding-left: 14px;
+  gap: 8px;
+  padding-left: 13px;
   border-left: 1px solid var(--line-1);
+  margin-left: auto;
 }
 
-.mvn-btn {
+/* Maven 分段按钮组（紧凑收纳） */
+.mvn-segment {
+  display: inline-flex;
+  background: #fff;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.mvn-seg-btn {
+  padding: 5px 12px;
+  font-size: 11px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  padding: 6px 11px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-right: 1px solid var(--line-1);
+  white-space: nowrap;
+}
+.mvn-seg-btn:last-child {
+  border-right: none;
+}
+.mvn-seg-btn:hover:not(:disabled) {
+  background: rgba(79, 124, 249, 0.08);
+  color: var(--accent-text);
+}
+.mvn-seg-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  color: var(--text-2);
+  background: var(--bg-input);
 }
 
 /* 构建中 spinner */
 .spinner {
   width: 11px;
   height: 11px;
-  border: 2px solid rgba(251, 191, 36, 0.25);
-  border-top-color: var(--warn);
+  border: 2px solid rgba(245, 158, 11, 0.25);
+  border-top-color: #f59e0b;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   flex-shrink: 0;
@@ -1769,45 +2531,44 @@ body {
 }
 
 .task-badge.running {
-  background: rgba(251, 191, 36, 0.1);
-  color: var(--warn);
-  border: 1px solid rgba(251, 191, 36, 0.3);
+  background: rgba(245, 158, 11, 0.1);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.35);
 }
 
 .task-badge.ok {
-  background: rgba(52, 211, 153, 0.1);
+  background: rgba(22, 163, 74, 0.09);
   color: var(--ok);
-  border: 1px solid rgba(52, 211, 153, 0.3);
+  border: 1px solid rgba(22, 163, 74, 0.3);
 }
 
 .task-badge.err {
-  background: rgba(248, 113, 113, 0.1);
+  background: rgba(220, 38, 38, 0.08);
   color: var(--danger);
-  border: 1px solid rgba(248, 113, 113, 0.3);
+  border: 1px solid rgba(220, 38, 38, 0.28);
 }
 
-/* 状态摘要 */
-.status-summary {
-  display: flex;
+/* 实时指标区 */
+.metrics-box {
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
-  margin-left: auto;
-}
-
-.state-label {
-  font-size: 12px;
-  color: var(--text-2);
-  white-space: nowrap;
-}
-
-.pid-tag {
-  font-size: 10.5px;
-  font-family: var(--font-mono);
-  background: rgba(96, 165, 250, 0.1);
-  border: 1px solid rgba(96, 165, 250, 0.25);
-  color: var(--info);
-  padding: 2px 8px;
+  gap: 7px;
+  padding: 3px 10px;
   border-radius: 20px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-1);
+}
+
+.metrics-box .spark {
+  display: block;
+  opacity: 0.95;
+}
+
+.metrics-text {
+  font-size: 10.5px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  white-space: nowrap;
 }
 
 /* ============ 日志控制台 ============ */
@@ -1817,11 +2578,12 @@ body {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-console);
+  position: relative;
 }
 
 .console-toolbar {
   height: 38px;
-  background: rgba(14, 22, 38, 0.6);
+  background: rgba(247, 249, 252, 0.85);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line-1);
   display: flex;
@@ -1846,16 +2608,97 @@ body {
   color: var(--text-1);
 }
 
+.console-title-sub {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
 .log-count {
   font-size: 10.5px;
-  color: var(--text-3);
+  color: var(--text-2);
   font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* 单服务/聚合切换 */
+.view-switch {
+  display: inline-flex;
+  background: #fff;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  padding: 1px;
+  gap: 1px;
+}
+
+.view-switch-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.view-switch-btn:hover {
+  color: var(--text-2);
+}
+.view-switch-btn.active {
+  background: rgba(79, 124, 249, 0.13);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+/* 日志级别过滤胶囊 */
+.level-switch {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.level-chip {
+  padding: 2px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: 0.5px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: #fff;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.level-chip:hover {
+  color: var(--text-1);
+  border-color: var(--accent);
+}
+.level-chip.active {
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(23, 32, 51, 0.13);
+}
+.level-chip.all.active {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.level-chip.info.active {
+  border-color: rgba(37, 99, 235, 0.55);
+  color: var(--info);
+}
+.level-chip.warn.active {
+  border-color: rgba(217, 119, 6, 0.6);
+  color: #92400e;
+}
+.level-chip.error.active {
+  border-color: rgba(220, 38, 38, 0.55);
+  color: var(--danger);
 }
 
 .toolbar-right {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
 }
 
 .log-filter-wrap {
@@ -1873,21 +2716,21 @@ body {
 }
 
 .log-filter-input {
-  background: var(--bg-input);
-  border: 1px solid var(--line-1);
+  background: #fff;
+  border: 1px solid var(--line-2);
   color: var(--text-1);
   font-size: 11.5px;
   padding: 4px 9px 4px 28px;
   border-radius: var(--r-sm);
-  width: 180px;
+  width: 170px;
   outline: none;
   transition: all 0.18s ease;
   font-family: inherit;
 }
 .log-filter-input:focus {
-  border-color: var(--line-accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
-  width: 220px;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 124, 249, 0.13);
+  width: 210px;
 }
 
 .auto-scroll-label {
@@ -1902,7 +2745,7 @@ body {
   display: none;
 }
 
-/* 自绘复选框（:has 匹配选中态） */
+/* 自绘复选框 */
 .checkbox-fake {
   display: inline-flex;
   align-items: center;
@@ -1911,7 +2754,7 @@ body {
   height: 15px;
   border-radius: 4px;
   border: 1px solid var(--line-2);
-  background: var(--bg-input);
+  background: #fff;
   color: transparent;
   transition: all 0.15s ease;
 }
@@ -1941,10 +2784,9 @@ body {
 }
 
 .log-time {
-  color: var(--text-3);
+  color: #94a0b4;
   flex-shrink: 0;
   font-size: 11px;
-  opacity: 0.75;
   padding-top: 1px;
 }
 
@@ -1952,209 +2794,48 @@ body {
   flex-shrink: 0;
   font-size: 9.5px;
   font-weight: 700;
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: 4px;
   letter-spacing: 0.5px;
   margin-top: 1px;
   font-family: inherit;
 }
 .log-level.INFO {
-  color: #93c5fd;
-  background: rgba(96, 165, 250, 0.13);
+  color: var(--info);
+  background: rgba(37, 99, 235, 0.09);
 }
 .log-level.WARN {
-  color: #fcd34d;
-  background: rgba(251, 191, 36, 0.13);
+  color: #92400e;
+  background: rgba(217, 119, 6, 0.15);
 }
 .log-level.ERROR {
-  color: #fca5a5;
-  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.1);
 }
 .log-level.DEBUG {
-  color: #6ee7b7;
-  background: rgba(52, 211, 153, 0.1);
+  color: #0d8a52;
+  background: rgba(22, 163, 74, 0.09);
 }
 .log-level.DEFAULT {
   color: var(--text-2);
-  background: rgba(148, 163, 184, 0.09);
-}
-.log-level.SYSTEM {
-  color: #c4b5fd;
-  background: rgba(139, 92, 246, 0.13);
+  background: var(--bg-input);
 }
 
 .log-content {
   flex: 1;
   white-space: pre-wrap;
-  color: #a8b6cc;
+  color: #3a4457;
 }
 
 .level-error .log-content {
-  color: #f87171;
-}
-.level-warn .log-content {
-  color: #fbbf24;
-}
-
-.empty-log-tip,
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  height: 100%;
-  color: var(--text-3);
-  font-size: 13px;
-}
-
-.empty-log-tip {
-  padding: 40px 0;
-}
-
-.empty-state .empty-icon {
-  color: var(--text-3);
-  opacity: 0.55;
-}
-
-.empty-title {
-  letter-spacing: 0.3px;
-}
-
-/* 服务分组 */
-.service-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.group-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px 4px;
-  user-select: none;
-}
-
-.group-name {
-  font-size: 10.5px;
-  font-weight: 700;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.group-count {
-  font-size: 9.5px;
-  color: var(--text-3);
-  background: rgba(148, 163, 184, 0.1);
-  padding: 0 5px;
-  border-radius: 8px;
-  font-family: var(--font-mono);
-}
-
-.group-actions {
-  display: inline-flex;
-  gap: 1px;
-  margin-left: auto;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.service-group:hover .group-actions {
-  opacity: 1;
-}
-
-.group-action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 21px;
-  height: 21px;
-  border: none;
-  background: none;
-  border-radius: 5px;
-  color: var(--ok);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.group-action-btn:hover {
-  background: rgba(52, 211, 153, 0.14);
-}
-.group-action-btn.stop {
   color: var(--danger);
 }
-.group-action-btn.stop:hover {
-  background: rgba(248, 113, 113, 0.14);
-}
-
-/* 顶栏图标按钮 */
-.icon-only-btn {
-  padding: 6px 8px;
-}
-
-/* 健康探针徽章 */
-.health-badge {
-  font-weight: 600;
-}
-
-/* 实时指标区 */
-.metrics-box {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 2px 9px;
-  border-radius: 20px;
-  background: rgba(148, 163, 184, 0.07);
-  border: 1px solid var(--line-1);
-}
-
-.metrics-box .spark {
-  display: block;
-  opacity: 0.95;
-}
-
-.metrics-text {
-  font-size: 10.5px;
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-}
-
-/* 日志视图切换 */
-.view-switch {
-  display: inline-flex;
-  background: var(--bg-input);
-  border: 1px solid var(--line-1);
-  border-radius: 7px;
-  padding: 1px;
-  gap: 1px;
-}
-
-.view-switch-btn {
-  padding: 2px 10px;
-  font-size: 11px;
-  border: none;
+.level-error {
+  background: rgba(220, 38, 38, 0.035);
   border-radius: 5px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.15s ease;
-  white-space: nowrap;
 }
-
-.view-switch-btn:hover {
-  color: var(--text-2);
-}
-
-.view-switch-btn.active {
-  background: rgba(99, 102, 241, 0.22);
-  color: var(--accent-soft);
-  font-weight: 600;
+.level-warn .log-content {
+  color: #92400e;
 }
 
 /* 聚合日志服务标签 */
@@ -2165,12 +2846,177 @@ body {
   padding: 1px 6px;
   border-radius: 4px;
   border: 1px solid;
-  background: rgba(148, 163, 184, 0.05);
+  background: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
   margin-top: 1px;
+}
+
+.empty-log-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-3);
+  font-size: 12.5px;
+  padding: 40px 0;
+}
+
+/* 回到底部悬浮胶囊 */
+.jump-bottom-pill {
+  position: sticky;
+  bottom: 14px;
+  left: calc(100% - 200px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 auto;
+  padding: 6px 14px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--accent-text);
+  background: #fff;
+  border: 1px solid rgba(79, 124, 249, 0.4);
+  border-radius: 20px;
+  box-shadow: 0 4px 16px rgba(23, 32, 51, 0.16);
+  cursor: pointer;
+  transition: all 0.16s ease;
+  pointer-events: auto;
+}
+.jump-bottom-pill:hover {
+  background: rgba(79, 124, 249, 0.07);
+}
+
+/* ============ 冷启动空状态 ============ */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: 40px;
+  overflow-y: auto;
+}
+
+.empty-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.empty-hero-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent-grad);
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(79, 124, 249, 0.35);
+}
+
+.empty-title {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.3px;
+}
+
+.empty-subtitle {
+  font-size: 13px;
+  color: var(--text-2);
+  max-width: 420px;
+  line-height: 1.6;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.empty-primary-btn {
+  padding: 9px 20px;
+  font-size: 13px;
+}
+
+/* 拖拽区 */
+.empty-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 26px;
+  border: 1.5px dashed var(--line-2);
+  border-radius: var(--r-lg);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--text-3);
+  transition: all 0.18s ease;
+  max-width: 520px;
+}
+.empty-dropzone.over {
+  border-color: var(--accent);
+  background: rgba(79, 124, 249, 0.06);
+  color: var(--accent-text);
+  box-shadow: 0 0 0 4px rgba(79, 124, 249, 0.1);
+}
+
+.dropzone-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--text-1);
+}
+
+.dropzone-sub {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* 核心能力微卡片 */
+.empty-features {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.feature-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 170px;
+  padding: 16px 14px;
+  background: #fff;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-lg);
+  color: var(--accent-text);
+  text-align: center;
+  transition: all 0.18s ease;
+}
+.feature-card:hover {
+  border-color: rgba(79, 124, 249, 0.35);
+  box-shadow: 0 6px 20px rgba(23, 32, 51, 0.08);
+  transform: translateY(-2px);
+}
+
+.feature-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.feature-desc {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.5;
 }
 
 /* ============ 按钮系统 ============ */
@@ -2197,38 +3043,39 @@ body {
 }
 
 .btn:disabled {
-  opacity: 0.35;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .btn.primary {
   background: var(--accent-grad);
   color: #ffffff;
-  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 2px 10px rgba(79, 124, 249, 0.32);
 }
 .btn.primary:hover:not(:disabled) {
-  filter: brightness(1.12);
-  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.5);
+  filter: brightness(1.06);
+  box-shadow: 0 4px 16px rgba(79, 124, 249, 0.42);
 }
 
 .btn.danger {
-  background: rgba(248, 113, 113, 0.13);
-  color: #fca5a5;
-  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--danger);
+  border-color: rgba(220, 38, 38, 0.3);
 }
 .btn.danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.22);
-  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(220, 38, 38, 0.14);
+  border-color: rgba(220, 38, 38, 0.45);
 }
 
 .btn.secondary {
-  background: var(--bg-elevated);
+  background: #fff;
   color: var(--text-1);
   border-color: var(--line-2);
+  box-shadow: 0 1px 3px rgba(23, 32, 51, 0.05);
 }
 .btn.secondary:hover:not(:disabled) {
-  border-color: var(--line-accent);
-  background: #1e2c48;
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 .btn.ghost {
@@ -2237,14 +3084,14 @@ body {
 }
 .btn.ghost:hover:not(:disabled) {
   color: var(--text-1);
-  background: rgba(148, 163, 184, 0.09);
+  background: var(--bg-hover);
   border-color: var(--line-1);
 }
 
 .btn.danger-ghost:hover:not(:disabled) {
-  color: #fca5a5;
-  background: rgba(248, 113, 113, 0.1);
-  border-color: rgba(248, 113, 113, 0.25);
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.25);
 }
 
 .btn.sm {

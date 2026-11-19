@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 pub struct AppState {
     pub config_manager: ConfigManager,
@@ -258,7 +259,25 @@ pub fn locate_built_jar(work_dir: String, module: String) -> Result<Option<Strin
     maven::locate_built_jar(&work_dir, module)
 }
 
-// ---------------- 项目终端 ----------------
+// ---------------- 项目终端与链接 ----------------
+
+/// 在浏览器中打开 http/https 链接（端口徽章一键直达 swagger/健康页）。
+#[tauri::command]
+pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("仅支持打开 http/https 链接".to_string());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// 判断路径是否为目录（拖拽建服务时校验项目文件夹）。
+#[tauri::command]
+pub fn path_is_dir(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
 
 /// 在服务工作目录唤起系统终端（Windows Terminal 优先，cmd 回退）。
 /// 终端独立于本应用生命周期：关闭 Runner 不会关闭终端。

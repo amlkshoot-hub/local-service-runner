@@ -399,6 +399,8 @@ const props = defineProps<{
   serviceData?: ServiceConfig | null;
   /** 现有分组名（datalist 自动补全） */
   existingGroups?: string[];
+  /** 拖拽新建时预填的项目目录 */
+  initialWorkDir?: string;
 }>();
 
 const emit = defineEmits<{
@@ -513,10 +515,12 @@ watch(
         profilesString.value = (form.value.selectedProfiles || []).join(',');
       } else {
         isEdit.value = false;
+        // 拖拽新建时预填项目目录，并以目录名作为默认服务名
+        const prefill = (props.initialWorkDir || '').trim();
         form.value = {
           id: 'svc-' + Date.now(),
-          name: '',
-          workDir: '',
+          name: prefill ? lastSegment(prefill) : '',
+          workDir: prefill,
           launchType: 'maven-wrapper',
           jarPath: '',
           customProgram: '',
@@ -546,8 +550,10 @@ watch(
       detectedMainClasses.value = [];
       detectedMainHint.value = '';
       if (form.value.workDir) {
-        // 编辑已有服务时，先探测一次模块信息，便于核对/调整启动模块
-        void detectModules();
+        // 打开时预填/已有目录：先探测模块，再扫描 Profile
+        void detectModules().then(() => {
+          if (!detectedProfiles.value.length) void scanProfiles();
+        });
       }
     }
   }
@@ -793,12 +799,12 @@ function save() {
 </script>
 
 <style scoped>
-/* 毛玻璃遮罩 */
+/* 毛玻璃遮罩（浅） */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(4, 7, 13, 0.62);
-  backdrop-filter: blur(10px);
+  background: rgba(180, 190, 208, 0.42);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -820,8 +826,8 @@ function save() {
   width: 640px;
   max-width: 92vw;
   max-height: 86vh;
-  background: var(--bg-card);
-  border: 1px solid var(--line-2);
+  background: #ffffff;
+  border: 1px solid rgba(23, 32, 51, 0.1);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-pop);
   display: flex;
@@ -847,7 +853,7 @@ function save() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: linear-gradient(180deg, rgba(99, 102, 241, 0.06), transparent);
+  background: linear-gradient(180deg, rgba(79, 124, 249, 0.06), transparent);
 }
 
 .modal-title {
@@ -871,7 +877,7 @@ function save() {
   transition: all 0.15s ease;
 }
 .icon-btn:hover {
-  background: rgba(248, 113, 113, 0.12);
+  background: rgba(220, 38, 38, 0.08);
   color: var(--danger);
 }
 
@@ -902,7 +908,7 @@ function save() {
 
 /* 输入控件统一 */
 .input-field {
-  background: var(--bg-input);
+  background: #fbfcfe;
   border: 1px solid var(--line-2);
   color: var(--text-1);
   padding: 8px 12px;
@@ -914,8 +920,9 @@ function save() {
   width: 100%;
 }
 .input-field:focus {
-  border-color: var(--line-accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.13);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 124, 249, 0.14);
+  background: #fff;
 }
 .input-field::placeholder {
   color: var(--text-3);
@@ -941,7 +948,7 @@ function save() {
   padding: 8px 12px;
   font-size: 12px;
   border: 1px solid var(--line-2);
-  background: var(--bg-input);
+  background: #fbfcfe;
   color: var(--text-2);
   border-radius: var(--r-md);
   cursor: pointer;
@@ -951,14 +958,14 @@ function save() {
 }
 .capsule-btn:hover {
   color: var(--text-1);
-  border-color: var(--line-accent);
+  border-color: var(--accent);
 }
 .capsule-btn.active {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.24), rgba(139, 92, 246, 0.16));
-  border-color: rgba(99, 102, 241, 0.55);
-  color: #fff;
+  background: linear-gradient(135deg, rgba(79, 124, 249, 0.14), rgba(106, 103, 247, 0.1));
+  border-color: rgba(79, 124, 249, 0.55);
+  color: var(--accent-text);
   font-weight: 600;
-  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.25);
+  box-shadow: 0 2px 10px rgba(79, 124, 249, 0.16);
 }
 
 /* 构建目标胶囊 */
@@ -973,7 +980,7 @@ function save() {
   font-size: 12px;
   font-family: var(--font-mono);
   border: 1px solid var(--line-2);
-  background: var(--bg-input);
+  background: #fbfcfe;
   color: var(--text-2);
   border-radius: var(--r-md);
   cursor: pointer;
@@ -981,12 +988,12 @@ function save() {
 }
 .goal-btn:hover {
   color: var(--text-1);
-  border-color: var(--line-accent);
+  border-color: var(--accent);
 }
 .goal-btn.active {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.24), rgba(139, 92, 246, 0.16));
-  border-color: rgba(99, 102, 241, 0.55);
-  color: #fff;
+  background: linear-gradient(135deg, rgba(79, 124, 249, 0.14), rgba(106, 103, 247, 0.1));
+  border-color: rgba(79, 124, 249, 0.55);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -1004,9 +1011,9 @@ function save() {
 .profile-tag {
   display: inline-flex;
   align-items: center;
-  background: rgba(52, 211, 153, 0.09);
-  border: 1px solid rgba(52, 211, 153, 0.28);
-  color: #6ee7b7;
+  background: rgba(22, 163, 74, 0.07);
+  border: 1px solid rgba(22, 163, 74, 0.3);
+  color: #0d8a52;
   padding: 2px 9px;
   border-radius: 20px;
   cursor: pointer;
@@ -1014,8 +1021,8 @@ function save() {
   transition: all 0.15s ease;
 }
 .profile-tag:hover {
-  background: rgba(52, 211, 153, 0.18);
-  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(22, 163, 74, 0.14);
+  border-color: rgba(22, 163, 74, 0.5);
 }
 
 /* 模块/提示信息 */
@@ -1025,43 +1032,12 @@ function save() {
   line-height: 1.6;
 }
 
-/* JVM 模板 chips */
-.jvm-template-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 3px;
-}
-
-.jvm-template-label {
-  font-size: 11px;
-  color: var(--text-3);
-}
-
-.jvm-template-chip {
-  font-size: 10.5px;
-  font-family: var(--font-mono);
-  color: var(--accent-soft);
-  background: rgba(99, 102, 241, 0.09);
-  border: 1px solid rgba(99, 102, 241, 0.28);
-  padding: 2px 9px;
-  border-radius: 20px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  white-space: nowrap;
-}
-.jvm-template-chip:hover {
-  background: rgba(99, 102, 241, 0.2);
-  border-color: rgba(99, 102, 241, 0.55);
-}
-
 .hint-ok {
   color: var(--ok);
 }
 
 .hint-warn {
-  color: var(--warn);
+  color: #b45309;
 }
 
 .hint-info {
@@ -1078,7 +1054,7 @@ function save() {
   color: var(--text-1);
 }
 
-/* 复选框自绘（通用） */
+/* 复选框自绘 */
 input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
@@ -1086,14 +1062,14 @@ input[type='checkbox'] {
   height: 16px;
   border-radius: 4px;
   border: 1px solid var(--line-2);
-  background: var(--bg-input);
+  background: #fff;
   cursor: pointer;
   position: relative;
   transition: all 0.15s ease;
   flex-shrink: 0;
 }
 input[type='checkbox']:hover {
-  border-color: var(--line-accent);
+  border-color: var(--accent);
 }
 input[type='checkbox']:checked {
   background: var(--accent-grad);
@@ -1119,7 +1095,7 @@ input[type='checkbox']:checked::after {
   transition: border-color 0.18s ease;
 }
 .collapsible:hover {
-  border-color: var(--line-accent);
+  border-color: var(--accent);
 }
 
 .collapsible-header {
@@ -1127,7 +1103,7 @@ input[type='checkbox']:checked::after {
   align-items: center;
   gap: 7px;
   font-size: 12px;
-  color: var(--accent-soft);
+  color: var(--accent-text);
   cursor: pointer;
   user-select: none;
   font-weight: 500;
@@ -1157,9 +1133,9 @@ input[type='checkbox']:checked::after {
 
 /* 错误横幅 */
 .error-banner {
-  background: rgba(248, 113, 113, 0.1);
-  border: 1px solid rgba(248, 113, 113, 0.4);
-  color: #fca5a5;
+  background: rgba(220, 38, 38, 0.06);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  color: var(--danger);
   padding: 9px 13px;
   border-radius: var(--r-md);
   font-size: 12px;
@@ -1185,7 +1161,7 @@ input[type='checkbox']:checked::after {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  background: rgba(7, 11, 20, 0.4);
+  background: #f9fafc;
 }
 
 /* 按钮系统（与 App.vue 一致） */
@@ -1210,26 +1186,27 @@ input[type='checkbox']:checked::after {
   transform: scale(0.97);
 }
 .btn:disabled {
-  opacity: 0.35;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 .btn.primary {
   background: var(--accent-grad);
   color: #ffffff;
-  box-shadow: 0 2px 12px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 2px 10px rgba(79, 124, 249, 0.32);
 }
 .btn.primary:hover:not(:disabled) {
-  filter: brightness(1.12);
-  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.5);
+  filter: brightness(1.06);
+  box-shadow: 0 4px 16px rgba(79, 124, 249, 0.42);
 }
 .btn.secondary {
-  background: var(--bg-elevated);
+  background: #fff;
   color: var(--text-1);
   border-color: var(--line-2);
+  box-shadow: 0 1px 3px rgba(23, 32, 51, 0.05);
 }
 .btn.secondary:hover:not(:disabled) {
-  border-color: var(--line-accent);
-  background: #1e2c48;
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 .btn.ghost {
   background: transparent;
@@ -1237,14 +1214,17 @@ input[type='checkbox']:checked::after {
 }
 .btn.ghost:hover:not(:disabled) {
   color: var(--text-1);
-  background: rgba(148, 163, 184, 0.09);
+  background: var(--bg-hover, rgba(23, 32, 51, 0.045));
   border-color: var(--line-1);
 }
 
-/* select 下拉的选项在深色下需要显式声明背景 */
+/* select 下拉选项适配浅色 */
+select.input-field {
+  background: #fbfcfe;
+}
 select.input-field option,
 select.input-field optgroup {
-  background: var(--bg-card);
+  background: #fff;
   color: var(--text-1);
 }
 </style>
