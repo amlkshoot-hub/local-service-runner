@@ -20,11 +20,6 @@
         "visible": true
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false,
-      "tooltip": "Local Service Runner"
-    },
     "security": {
       "csp": null
     }
