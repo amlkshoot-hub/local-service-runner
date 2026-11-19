@@ -114,7 +114,7 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
   - **模块可手动覆盖**：配置弹窗中可选择/切换启动模块（留空为自动检测），主界面标题处显示当前实际使用的模块；Maven 系启动方式（Wrapper / 构建+JAR / 源码主类）共用该模块选择：构建+JAR 模式下模块用于定位构建产物与 Profile 扫描，源码主类模式下模块用于 `-pl` 运行。
   - **Profile 自动定位**：Profile 扫描会优先读取启动模块下的 `src/main/resources`，多模块工程同样能识别 `application-{profile}.yml`。
   - **启动失败可见**：进程以非 0 退出码结束时状态显示为「异常退出」，而不是「已停止」，便于快速定位问题。
-> 说明：Maven 多模块工程的子模块 jar 需要存在于本地仓库，首次使用前请在工程根目录执行一次 `mvn install -DskipTests`（IDEA 会自动使用工作区模块，命令行 Maven 不会）。
+> 说明：多模块工程下，「Maven Wrapper」与「源码主类直启」启动时会自动先执行 `-pl <启动模块> -am install -DskipTests` 把启动模块的**依赖链**安装到本地仓库，再以 `spring-boot:run` / `exec:java` 启动——彻底避免「兄弟模块 was not found / failure was cached」类依赖解析失败（IDEA 会自动使用工作区模块，命令行 Maven 不会，此链式命令即为补齐该差异）。代价是每次启动多几秒安装时间；「构建+JAR 运行」本就是全工程构建，无需此步骤。
 
 ---
 
@@ -252,6 +252,10 @@ cargo build --release
 3. **平台限定**：进程控制、管道读取与命令行拼装均针对 Windows 实现，暂不支持 macOS / Linux。
 
 ## 更新记录
+
+### 2026-11-19（六）
+- **修复多模块启动的兄弟依赖解析失败**：报错典型为 `org.xxx:ry-delivery:jar was not found ... This failure was cached in the local repository`——多模块工程以 `-pl <模块>` 启动时，兄弟模块只能从本地仓库解析，而它从未 install 过且远程查找失败被 Maven 缓存。「Maven Wrapper」与「源码主类直启」在多模块工程下的命令改为链式两步：`mvn -pl <模块> -am install -DskipTests && mvn -pl <模块> <原启动命令>`，依赖链自动安装、失败自愈；单模块工程保持原直接命令。附带修复仅修托盘双图标（声明式与代码式托盘重复注册）并新增单实例互斥（二次启动唤起已有窗口）。
+- 新增 3 项测试（37 项全部通过）：链式命令结构、链式 cmd /c 引号处理（&& 不被引号包裹）、单模块不走 install 链。
 
 ### 2026-11-19（五）——浅色主题与 UIUX 全面重构（基于评审建议文档）
 - **整体切换浅色主题**：深色系替换为「白底淡蓝」三阶明度（画布/侧栏/顶栏），全局令牌重写；次要文本对比度提升至 WCAG AA，数字 tabular-nums 防抖动。

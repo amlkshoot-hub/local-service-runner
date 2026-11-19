@@ -1079,17 +1079,34 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
 
             let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
 
-            let mut maven_args = Vec::new();
-            if let Some(module) = plan.module {
-                maven_args.push("-pl".to_string());
-                maven_args.push(module);
+            // 多模块工程：`-pl <模块>` 单模块构建时，兄弟模块（如 ry-delivery）
+            // 只能从本地仓库解析；若从未 install 过（且远程查找失败被 Maven 缓存），
+            // 就会出现 "was not found ... failure was cached"。
+            // 因此先执行 `-pl <模块> -am install -DskipTests` 把依赖链装入本地仓库，
+            // 成功后再启动。单模块工程保持原自接命令。
+            let mut wrapped = vec!["/c".to_string()];
+            match plan.module {
+                Some(module) => {
+                    notes.push(format!(
+                        "多模块：先安装启动模块依赖链到本地仓库（-pl {} -am install -DskipTests），再以 spring-boot:run 启动",
+                        module
+                    ));
+                    wrapped.push(cmd_path.clone());
+                    for arg in ["-pl", &module, "-am", "install", "-DskipTests"] {
+                        wrapped.push(arg.to_string());
+                    }
+                    wrapped.push("&&".to_string());
+                    wrapped.push(cmd_path);
+                    wrapped.push("-pl".to_string());
+                    wrapped.push(module);
+                }
+                None => {
+                    wrapped.push(cmd_path);
+                }
             }
-            maven_args.push("spring-boot:run".to_string());
-            maven_args.extend(profile_args.iter().cloned());
-            maven_args.extend(config.args.iter().cloned());
-
-            let mut wrapped = vec!["/c".to_string(), cmd_path];
-            wrapped.extend(maven_args);
+            wrapped.push("spring-boot:run".to_string());
+            wrapped.extend(profile_args.iter().cloned());
+            wrapped.extend(config.args.iter().cloned());
 
             Ok(BuiltCommand {
                 executable: "cmd.exe".to_string(),
@@ -1177,8 +1194,10 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
         }
         LaunchType::SourceMainClass => {
             // 直接通过源码启动类运行（IDEA “点 main 类运行”的命令行等价物）：
-            // mvn compile 先增量编译，exec:java 以项目依赖 + target/classes 在
-            // Maven JVM 内直接运行主类。
+            // exec:java 以项目依赖 + target/classes 在 Maven JVM 内直接运行主类。
+            // 多模块工程同样存在兄弟模块依赖需从本地仓库解析的问题：
+            // 先 `-pl <模块> -am install -DskipTests` 安装依赖链，再 exec:java；
+            // 单模块工程直接 exec:java。
             let main_class = config
                 .main_class
                 .as_deref()
@@ -1195,21 +1214,33 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
 
             let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
 
-            let mut maven_args = Vec::new();
-            if let Some(module) = plan.module {
-                maven_args.push("-pl".to_string());
-                maven_args.push(module);
+            let mut wrapped = vec!["/c".to_string()];
+            match plan.module {
+                Some(module) => {
+                    notes.push(format!(
+                        "多模块：先安装启动模块依赖链到本地仓库（-pl {} -am install -DskipTests），再运行主类 {}",
+                        module, main_class
+                    ));
+                    wrapped.push(cmd_path.clone());
+                    for arg in ["-pl", &module, "-am", "install", "-DskipTests"] {
+                        wrapped.push(arg.to_string());
+                    }
+                    wrapped.push("&&".to_string());
+                    wrapped.push(cmd_path);
+                    wrapped.push("-pl".to_string());
+                    wrapped.push(module);
+                }
+                None => {
+                    wrapped.push(cmd_path);
+                    wrapped.push("compile".to_string());
+                }
             }
-            maven_args.push("compile".to_string());
-            maven_args.push("exec:java".to_string());
-            maven_args.push(format!("-Dexec.mainClass={}", main_class));
-            maven_args.extend(profile_args.iter().cloned());
-            maven_args.extend(config.args.iter().cloned());
+            wrapped.push("exec:java".to_string());
+            wrapped.push(format!("-Dexec.mainClass={}", main_class));
+            wrapped.extend(profile_args.iter().cloned());
+            wrapped.extend(config.args.iter().cloned());
 
             notes.push(format!("通过源码启动类运行: {}", main_class));
-
-            let mut wrapped = vec!["/c".to_string(), cmd_path];
-            wrapped.extend(maven_args);
 
             Ok(BuiltCommand {
                 executable: "cmd.exe".to_string(),
@@ -1431,21 +1462,32 @@ mod tests {
         let dir = temp_maven_project("detected");
         let config = sample_config(dir.to_str().unwrap());
 
+        // 多模块：链条为 install 依赖链 && spring-boot:run
         let built = build_command(&config, &[]).unwrap();
         assert_eq!(built.executable, "cmd.exe");
         assert_eq!(built.args[0], "/c");
+        assert_eq!(built.args[1], "mvn.cmd");
         assert_eq!(built.args[2], "-pl");
         assert_eq!(built.args[3], "app");
-        assert_eq!(built.args[4], "spring-boot:run");
+        assert_eq!(built.args[4], "-am");
+        assert_eq!(built.args[5], "install");
+        assert_eq!(built.args[6], "-DskipTests");
+        assert_eq!(built.args[7], "&&");
+        assert_eq!(built.args[8], "mvn.cmd");
+        assert_eq!(built.args[9], "-pl");
+        assert_eq!(built.args[10], "app");
+        assert_eq!(built.args[11], "spring-boot:run");
         assert!(built.notes.iter().any(|n| n.contains("\"app\"")));
 
-        // 显式配置模块时不再输出自动探测提示
+        // 显式配置模块时不再输出自动探测提示，但仍有依赖链安装说明
         let mut configured = sample_config(dir.to_str().unwrap());
         configured.maven_module = Some("app".to_string());
         let built = build_command(&configured, &[]).unwrap();
-        assert_eq!(built.args[2], "-pl");
         assert_eq!(built.args[3], "app");
-        assert!(built.notes.is_empty());
+        assert_eq!(built.args[7], "&&");
+        assert_eq!(built.args[11], "spring-boot:run");
+        assert!(built.notes.iter().any(|n| n.contains("-am install")));
+        assert!(built.notes.iter().all(|n| !n.contains("已自动选择")));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1483,6 +1525,51 @@ mod tests {
         assert_eq!(
             build_windows_command_line("cmd.exe", &plain),
             r#"cmd.exe /c mvn.cmd -pl ry-admin"#
+        );
+    }
+
+    /// 多模块链式命令（install 依赖链 && 启动）的 cmd /c 引号处理：
+    /// && 不能被引号包裹，否则会被当成普通参数传给 mvn。
+    #[test]
+    fn test_cmd_command_line_chained_install_and_run() {
+        // 无空格的 mvn.cmd（PATH 查找）：不包外层引号，&& 为顶层运算符
+        let plain: Vec<String> = vec![
+            "/c".to_string(),
+            "mvn.cmd".to_string(),
+            "-pl".to_string(),
+            "ry-admin".to_string(),
+            "-am".to_string(),
+            "install".to_string(),
+            "-DskipTests".to_string(),
+            "&&".to_string(),
+            "mvn.cmd".to_string(),
+            "-pl".to_string(),
+            "ry-admin".to_string(),
+            "spring-boot:run".to_string(),
+        ];
+        assert_eq!(
+            build_windows_command_line("cmd.exe", &plain),
+            "cmd.exe /c mvn.cmd -pl ry-admin -am install -DskipTests && mvn.cmd -pl ry-admin spring-boot:run"
+        );
+
+        // 带空格的 mvnw.cmd：外层包引号，cmd /c 会剥离首尾引号，&& 仍在顶层生效
+        let spaced: Vec<String> = vec![
+            "/c".to_string(),
+            r"C:\Program Files\pms\mvnw.cmd".to_string(),
+            "-pl".to_string(),
+            "ry-admin".to_string(),
+            "-am".to_string(),
+            "install".to_string(),
+            "-DskipTests".to_string(),
+            "&&".to_string(),
+            r"C:\Program Files\pms\mvnw.cmd".to_string(),
+            "-pl".to_string(),
+            "ry-admin".to_string(),
+            "spring-boot:run".to_string(),
+        ];
+        assert_eq!(
+            build_windows_command_line("cmd.exe", &spaced),
+            r#"cmd.exe /c ""C:\Program Files\pms\mvnw.cmd" -pl ry-admin -am install -DskipTests && "C:\Program Files\pms\mvnw.cmd" -pl ry-admin spring-boot:run""#
         );
     }
 
@@ -1587,19 +1674,30 @@ mod tests {
         config.maven_module = Some("app".to_string());
         config.selected_profiles = vec!["dev".to_string()];
 
+        // 多模块：install 依赖链 && exec:java
         let built = build_command(&config, &[]).unwrap();
         assert_eq!(built.executable, "cmd.exe");
         assert_eq!(built.args[0], "/c");
         assert_eq!(built.args[1], "mvn.cmd");
         assert_eq!(built.args[2], "-pl");
         assert_eq!(built.args[3], "app");
-        assert_eq!(built.args[4], "compile");
-        assert_eq!(built.args[5], "exec:java");
-        assert_eq!(built.args[6], "-Dexec.mainClass=com.example.DemoApplication");
+        assert_eq!(built.args[4], "-am");
+        assert_eq!(built.args[5], "install");
+        assert_eq!(built.args[6], "-DskipTests");
+        assert_eq!(built.args[7], "&&");
+        assert_eq!(built.args[8], "mvn.cmd");
+        assert_eq!(built.args[9], "-pl");
+        assert_eq!(built.args[10], "app");
+        assert_eq!(built.args[11], "exec:java");
+        assert_eq!(
+            built.args[12],
+            "-Dexec.mainClass=com.example.DemoApplication"
+        );
         assert!(built
             .notes
             .iter()
             .any(|n| n.contains("com.example.DemoApplication")));
+        assert!(built.notes.iter().any(|n| n.contains("-am install")));
 
         // 缺少主类必须被拒绝
         let mut missing = sample_config(dir.to_str().unwrap());
@@ -1607,6 +1705,47 @@ mod tests {
         missing.main_class = None;
         let err = build_command(&missing, &[]).unwrap_err();
         assert!(err.contains("主类"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 单模块工程（根即 Spring Boot 工程，无可选子模块）：保持原直接命令，不加 install 链。
+    #[test]
+    fn test_source_main_class_single_module_stays_direct() {
+        let dir = std::env::temp_dir().join("lsr-process-tests").join(format!(
+            "source-single-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pom.xml"),
+            r#"<project>
+                <artifactId>solo</artifactId>
+                <build>
+                    <plugins>
+                        <plugin>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-maven-plugin</artifactId>
+                        </plugin>
+                    </plugins>
+                </build>
+            </project>"#,
+        )
+        .unwrap();
+
+        let mut config = sample_config(dir.to_str().unwrap());
+        config.launch_type = LaunchType::SourceMainClass;
+        config.main_class = Some("com.example.SoloApplication".to_string());
+
+        let built = build_command(&config, &[]).unwrap();
+        assert_eq!(built.args[0], "/c");
+        assert_eq!(built.args[1], "mvn.cmd");
+        assert_eq!(built.args[2], "compile");
+        assert_eq!(built.args[3], "exec:java");
+        assert_eq!(built.args[4], "-Dexec.mainClass=com.example.SoloApplication");
+        assert!(!built.args.contains(&"&&".to_string()));
+        assert!(built.notes.iter().all(|n| !n.contains("-am install")));
 
         let _ = fs::remove_dir_all(&dir);
     }
