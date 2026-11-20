@@ -133,8 +133,8 @@ pub fn build_profile_args(
             vec![format!("--args=--spring.profiles.active={}", active_str)]
         }
         LaunchType::SourceMainClass => {
-            // exec:java 通过 exec.args 把应用参数传给 main 方法
-            vec![format!("-Dexec.args=--spring.profiles.active={}", active_str)]
+            // IDEA 式 classpath 直跑：最终以 java -cp 运行主类，Profile 作为应用参数传入
+            vec![format!("--spring.profiles.active={}", active_str)]
         }
         LaunchType::Custom => {
             if inject_profile_custom {
@@ -199,7 +199,7 @@ mod tests {
     fn test_build_profile_args_source_main_class() {
         let profiles = vec!["prod".to_string()];
         let args = build_profile_args(&LaunchType::SourceMainClass, &profiles, &[], false);
-        assert_eq!(args, vec!["-Dexec.args=--spring.profiles.active=prod"]);
+        assert_eq!(args, vec!["--spring.profiles.active=prod"]);
     }
 
     #[test]

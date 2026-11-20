@@ -53,10 +53,11 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
   - 构建成功后自动在启动模块（或工程根）`target/` 下定位最新产物 JAR（排除 `*-sources.jar` / `*-tests.jar` / `*-javadoc.jar` 等附属包），并以 `java -jar` 拉起服务；
   - 构建失败（非 0 退出码）状态标记为「异常退出」，不启动服务；
   - 构建进程同样纳入 Job Object：停止即终止整棵 Maven 进程树。
-- **源码主类直启（新增）**：IDEA “点 main 类运行”的命令行等价物：
-  - 执行 `mvn -pl <module> compile exec:java -Dexec.mainClass=<主类>`；
+- **源码主类直启**：IDEA “点 main 类运行”的命令行等价物（真 classpath 直跑，**无需 install**）：
+  - 两阶段执行：① `mvn -pl <module> -am compile dependency:build-classpath` 在同一个 reactor 会话内编译启动模块及依赖链，并导出依赖 classpath——兄弟模块自动解析为各自的 `target/classes`（与 IDEA 工作区引用一致）；② `java -cp "<模块 target/classes>;<依赖…>" <主类> --spring.profiles.active=…` 直接运行。
+  - 单模块 / 多模块统一两阶段流程；运行的根进程就是 **java 本身**（界面展示的 PID 即应用进程）；
   - 主类可一键探测：扫描 `src/main/java` 下含 `@SpringBootApplication` 注解（优先）或 `public static void main` 的类；
-  - 修改源码后直接重启即生效，无需打包。
+  - 修改源码后直接重启即生效，无需打包，不污染本地仓库。
 - **Gradle Wrapper**：`gradlew bootRun`。
 - **自定义命令**：任意可执行程序。
 
@@ -114,7 +115,7 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
   - **模块可手动覆盖**：配置弹窗中可选择/切换启动模块（留空为自动检测），主界面标题处显示当前实际使用的模块；Maven 系启动方式（Wrapper / 构建+JAR / 源码主类）共用该模块选择：构建+JAR 模式下模块用于定位构建产物与 Profile 扫描，源码主类模式下模块用于 `-pl` 运行。
   - **Profile 自动定位**：Profile 扫描会优先读取启动模块下的 `src/main/resources`，多模块工程同样能识别 `application-{profile}.yml`。
   - **启动失败可见**：进程以非 0 退出码结束时状态显示为「异常退出」，而不是「已停止」，便于快速定位问题。
-> 说明：多模块工程下，「Maven Wrapper」与「源码主类直启」启动时会自动先执行 `-pl <启动模块> -am install -DskipTests` 把启动模块的**依赖链**安装到本地仓库，再以 `spring-boot:run` / `exec:java` 启动——彻底避免「兄弟模块 was not found / failure was cached」类依赖解析失败（IDEA 会自动使用工作区模块，命令行 Maven 不会，此链式命令即为补齐该差异）。代价是每次启动多几秒安装时间；「构建+JAR 运行」本就是全工程构建，无需此步骤。
+> 说明：多模块工程下，「Maven Wrapper」启动时会自动先执行 `-pl <启动模块> -am install -DskipTests` 把启动模块的**依赖链**安装到本地仓库，再以 `spring-boot:run` 启动——避免「兄弟模块 was not found / failure was cached」类依赖解析失败（spring-boot:run 机制只能从本地仓库解析兄弟依赖）；「源码主类直启」与「构建+JAR 运行」不受此限制：前者用 reactor 内 `target/classes` 直跑（零 install），后者本就全工程构建。
 
 ---
 
@@ -252,6 +253,12 @@ cargo build --release
 3. **平台限定**：进程控制、管道读取与命令行拼装均针对 Windows 实现，暂不支持 macOS / Linux。
 
 ## 更新记录
+
+### 2026-11-19（七）——源码主类直启重构为 IDEA 式 classpath 直跑
+- **彻底去掉 install 依赖**：「源码主类直启」改为两阶段——① `mvn -pl <模块> -am compile dependency:build-classpath -Dmdep.outputFile=<临时文件> -Dmdep.regenerateFile=true`（reactor 内编译依赖链，共享输出文件由 reactor 末尾的启动模块覆盖写入，兄弟模块解析为各自 `target/classes`）；② Rust 读取 classpath 文件，以 `java -cp "<模块>/target/classes;<依赖…>" <主类> --spring.profiles.active=…` 直接拉起 java 进程。
+- 运行的根进程变为 **java 本身**（PID 即应用进程，不再显示 mvn 的 PID）；单模块/多模块统一两阶段流程。
+- Profile 注入方式随之改为应用参数（`--spring.profiles.active=…`），与 JAR 模式一致；「Maven Wrapper」保留 install 链方案（spring-boot:run 的机制限制）。
+- 真实端到端验证：最小多模块工程（app 依赖 lib）实测——classpath 文件正确包含 `lib\target\classes`，`java -cp` 直跑输出兄弟模块类结果与 Profile 参数，全程未 install。测试 38 项全部通过。
 
 ### 2026-11-19（六）
 - **修复多模块启动的兄弟依赖解析失败**：报错典型为 `org.xxx:ry-delivery:jar was not found ... This failure was cached in the local repository`——多模块工程以 `-pl <模块>` 启动时，兄弟模块只能从本地仓库解析，而它从未 install 过且远程查找失败被 Maven 缓存。「Maven Wrapper」与「源码主类直启」在多模块工程下的命令改为链式两步：`mvn -pl <模块> -am install -DskipTests && mvn -pl <模块> <原启动命令>`，依赖链自动安装、失败自愈；单模块工程保持原直接命令。附带修复仅修托盘双图标（声明式与代码式托盘重复注册）并新增单实例互斥（二次启动唤起已有窗口）。

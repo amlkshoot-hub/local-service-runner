@@ -82,6 +82,15 @@ pub(crate) struct SpawnHandles {
     pub pid: u32,
 }
 
+/// 两阶段启动的预处理类型：决定第一阶段成功后的第二阶段动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrepareKind {
+    /// maven-build-jar：构建完成后定位 JAR 并以 java -jar 运行
+    BuildJar,
+    /// source-main-class：编译 + 导出 classpath 后以 java -cp 直跑主类
+    SourceMainClass,
+}
+
 #[derive(Clone)]
 pub struct ProcessManager {
     statuses: Arc<Mutex<HashMap<String, ServiceStatus>>>,
@@ -217,6 +226,15 @@ impl ProcessManager {
 
         let active_profiles_for_record = effective_active_profiles(config);
 
+        // source-main-class：先清理上一轮遗留的 classpath 导出文件，避免误读旧依赖
+        if config.launch_type == LaunchType::SourceMainClass {
+            let cp_file = classpath_output_path(&config.id);
+            if let Some(parent) = cp_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(&cp_file);
+        }
+
         let built = match build_command(config, &profile_args) {
             Ok(res) => res,
             Err(e) => {
@@ -254,6 +272,17 @@ impl ProcessManager {
                     &built.executable,
                     &built.args,
                     active_profiles_for_record,
+                    PrepareKind::BuildJar,
+                )
+            } else if config.launch_type == LaunchType::SourceMainClass {
+                // source-main-class：先编译并导出依赖 classpath，成功后 java -cp 直跑主类
+                self.spawn_build_process(
+                    app_handle,
+                    config,
+                    &built.executable,
+                    &built.args,
+                    active_profiles_for_record,
+                    PrepareKind::SourceMainClass,
                 )
             } else {
                 self.spawn_service_process(
@@ -594,7 +623,7 @@ impl ProcessManager {
         Ok(())
     }
 
-    /// Maven 构建阶段（maven-build-jar 第一阶段）：构建成功后自动定位 JAR 并运行。
+    /// 两阶段启动的第一阶段（构建 / 编译+导出 classpath）：成功后的第二阶段动作由 `prepare` 决定。
     #[cfg(windows)]
     fn spawn_build_process(
         &self,
@@ -603,14 +632,18 @@ impl ProcessManager {
         executable: &str,
         args: &[String],
         active_profiles: Vec<String>,
+        prepare: PrepareKind,
     ) -> Result<(), String> {
-        let goal = config
-            .build_goal
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("package")
-            .to_string();
+        let goal = match prepare {
+            PrepareKind::BuildJar => config
+                .build_goal
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("package")
+                .to_string(),
+            PrepareKind::SourceMainClass => "compile".to_string(),
+        };
 
         let self_clone = self.clone();
         let app_for_watch = app_handle.cloned();
@@ -620,6 +653,7 @@ impl ProcessManager {
 
         let watched_pid_for_cb = std::sync::Arc::clone(&watched_pid_holder);
         let goal_for_cb = goal.clone();
+        let prepare_for_cb = prepare;
         let on_exit = Box::new(move |code_opt: Option<i32>| {
             let watched_pid = *watched_pid_for_cb.lock().unwrap();
 
@@ -665,13 +699,17 @@ impl ProcessManager {
                     self_clone.log_manager.append_log(
                         app_for_watch.as_ref(),
                         &service_id,
-                        format!("=== Maven {} 构建成功 ===", goal_for_cb),
+                        format!("=== Maven {} 阶段完成 ===", goal_for_cb),
                         "system",
                     );
-                    if let Err(err) = self_clone.start_jar_after_build(
-                        app_for_watch.as_ref(),
-                        &config_for_cb,
-                    ) {
+                    let phase2 = match prepare_for_cb {
+                        PrepareKind::BuildJar => {
+                            self_clone.start_jar_after_build(app_for_watch.as_ref(), &config_for_cb)
+                        }
+                        PrepareKind::SourceMainClass => self_clone
+                            .start_main_class_after_build(app_for_watch.as_ref(), &config_for_cb),
+                    };
+                    if let Err(err) = phase2 {
                         self_clone.set_status(
                             app_for_watch.as_ref(),
                             &service_id,
@@ -830,6 +868,108 @@ impl ProcessManager {
             app_handle,
             &config.id,
             format!("Command: {} {}", java_cmd, all_args.join(" ")),
+            "system",
+        );
+
+        let active_profiles = effective_active_profiles(config);
+        self.spawn_service_process(app_handle, config, &java_cmd, &all_args, active_profiles)
+    }
+
+    /// 源码主类第二阶段：读取导出的依赖 classpath，以 `java -cp` 直接运行主类。
+    ///
+    /// 与 IDEA「点 main 类运行」等价：兄弟模块解析为各自的 `target/classes`
+    /// （由第一阶段 reactor 内编译产物保证），**无需 install 到本地仓库**。
+    #[cfg(windows)]
+    fn start_main_class_after_build(
+        &self,
+        app_handle: Option<&AppHandle>,
+        config: &ServiceConfig,
+    ) -> Result<(), String> {
+        // 阶段切换间可能插入停止操作
+        match self.get_status(&config.id) {
+            ServiceStatus::Stopping | ServiceStatus::Stopped => return Ok(()),
+            _ => {}
+        }
+
+        let main_class = config
+            .main_class
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "源码主类直启模式下必须指定主类".to_string())?;
+
+        // 启动模块目录（与第一阶段 plan_module 保持一致）
+        let plan = maven::plan_module(&config.work_dir, config.maven_module.as_deref())?;
+        let module_dir = match &plan.module {
+            Some(module) => Path::new(&config.work_dir).join(module),
+            None => Path::new(&config.work_dir).to_path_buf(),
+        };
+
+        // 读取第一阶段导出的依赖 classpath（reactor 内兄弟模块 → target/classes）
+        let cp_file = classpath_output_path(&config.id);
+        let raw = std::fs::read_to_string(&cp_file).map_err(|e| {
+            format!(
+                "编译成功但读取依赖 classpath 失败（{}）：{}。请确认工程可使用 dependency:build-classpath。",
+                cp_file.display(),
+                e
+            )
+        })?;
+        let deps: String = raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(";");
+        let dep_count = if deps.is_empty() {
+            0
+        } else {
+            deps.split(';').count()
+        };
+
+        let classes_dir = module_dir.join("target").join("classes");
+        let full_cp = if deps.is_empty() {
+            classes_dir.to_string_lossy().into_owned()
+        } else {
+            format!("{};{}", classes_dir.to_string_lossy(), deps)
+        };
+
+        let java_cmd = config
+            .java_path
+            .as_ref()
+            .filter(|p| !p.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "java.exe".to_string());
+
+        let profile_args = build_profile_args(
+            &LaunchType::SourceMainClass,
+            &config.selected_profiles,
+            &config.args,
+            config.inject_profile_custom,
+        );
+
+        let mut all_args = vec!["-cp".to_string(), full_cp, main_class.to_string()];
+        all_args.extend(profile_args.iter().cloned());
+        all_args.extend(config.args.iter().cloned());
+
+        self.log_manager.append_log(
+            app_handle,
+            &config.id,
+            format!(
+                "=== IDEA 式 classpath 直跑：target/classes + {} 个依赖路径 ===",
+                dep_count
+            ),
+            "system",
+        );
+        self.log_manager.append_log(
+            app_handle,
+            &config.id,
+            format!(
+                "Command: {} -cp <target\\classes + {} 依赖> {} {}",
+                java_cmd,
+                dep_count,
+                main_class,
+                profile_args.join(" ")
+            ),
             "system",
         );
 
@@ -1193,11 +1333,12 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
             })
         }
         LaunchType::SourceMainClass => {
-            // 直接通过源码启动类运行（IDEA “点 main 类运行”的命令行等价物）：
-            // exec:java 以项目依赖 + target/classes 在 Maven JVM 内直接运行主类。
-            // 多模块工程同样存在兄弟模块依赖需从本地仓库解析的问题：
-            // 先 `-pl <模块> -am install -DskipTests` 安装依赖链，再 exec:java；
-            // 单模块工程直接 exec:java。
+            // 源码主类直启 = IDEA「点 main 类运行」的命令行等价物：
+            // 第一阶段（本命令）在同一个 reactor 会话内编译启动模块及依赖链，
+            // 并用 dependency:build-classpath 导出依赖 classpath——reactor 内的
+            // 兄弟模块会被解析为各自的 target/classes（与 IDEA 一致），全程不 install。
+            // 第二阶段（start_main_class_after_build）读取导出的 classpath，
+            // 以 java -cp 直接运行主类。
             let main_class = config
                 .main_class
                 .as_deref()
@@ -1213,34 +1354,32 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
             }
 
             let cmd_path = maven_cmd_path(Path::new(&config.work_dir));
+            let cp_file = classpath_output_path(&config.id);
 
-            let mut wrapped = vec!["/c".to_string()];
+            let mut wrapped = vec!["/c".to_string(), cmd_path];
             match plan.module {
                 Some(module) => {
-                    notes.push(format!(
-                        "多模块：先安装启动模块依赖链到本地仓库（-pl {} -am install -DskipTests），再运行主类 {}",
-                        module, main_class
-                    ));
-                    wrapped.push(cmd_path.clone());
-                    for arg in ["-pl", &module, "-am", "install", "-DskipTests"] {
+                    for arg in ["-pl", &module, "-am"] {
                         wrapped.push(arg.to_string());
                     }
-                    wrapped.push("&&".to_string());
-                    wrapped.push(cmd_path);
-                    wrapped.push("-pl".to_string());
-                    wrapped.push(module);
+                    notes.push(format!(
+                        "IDEA 式直跑：先编译模块 {} 及其依赖链（不 install），导出 classpath 后以 java -cp 启动主类",
+                        module
+                    ));
                 }
                 None => {
-                    wrapped.push(cmd_path);
-                    wrapped.push("compile".to_string());
+                    notes.push(
+                        "IDEA 式直跑：先编译工程并导出依赖 classpath（不 install），再以 java -cp 启动主类"
+                            .to_string(),
+                    );
                 }
             }
-            wrapped.push("exec:java".to_string());
-            wrapped.push(format!("-Dexec.mainClass={}", main_class));
-            wrapped.extend(profile_args.iter().cloned());
-            wrapped.extend(config.args.iter().cloned());
+            wrapped.push("compile".to_string());
+            wrapped.push("dependency:build-classpath".to_string());
+            wrapped.push(format!("-Dmdep.outputFile={}", cp_file.display()));
+            wrapped.push("-Dmdep.regenerateFile=true".to_string());
 
-            notes.push(format!("通过源码启动类运行: {}", main_class));
+            notes.push(format!("首次运行将编译并导出依赖，主类: {}", main_class));
 
             Ok(BuiltCommand {
                 executable: "cmd.exe".to_string(),
@@ -1249,6 +1388,25 @@ fn build_command(config: &ServiceConfig, profile_args: &[String]) -> Result<Buil
             })
         }
     }
+}
+
+/// 源码主类直跑：第一阶段导出依赖 classpath 的临时文件路径。
+/// 使用固定路径而非模块相对路径——`-am` 会让 reactor 内每个模块都执行
+/// build-classpath，绝对路径保证最终留下的是启动模块（reactor 末尾）的依赖集。
+fn classpath_output_path(service_id: &str) -> std::path::PathBuf {
+    let safe: String = service_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir()
+        .join("local-service-runner")
+        .join(format!("lsr-cp-{}.txt", safe))
 }
 
 /// 项目目录下存在 mvnw.cmd 则优先使用，否则使用 PATH 中的 mvn.cmd。
@@ -1674,7 +1832,7 @@ mod tests {
         config.maven_module = Some("app".to_string());
         config.selected_profiles = vec!["dev".to_string()];
 
-        // 多模块：install 依赖链 && exec:java
+        // 多模块：compile 依赖链 + 导出 classpath（不 install，不用 exec:java）
         let built = build_command(&config, &[]).unwrap();
         assert_eq!(built.executable, "cmd.exe");
         assert_eq!(built.args[0], "/c");
@@ -1682,22 +1840,20 @@ mod tests {
         assert_eq!(built.args[2], "-pl");
         assert_eq!(built.args[3], "app");
         assert_eq!(built.args[4], "-am");
-        assert_eq!(built.args[5], "install");
-        assert_eq!(built.args[6], "-DskipTests");
-        assert_eq!(built.args[7], "&&");
-        assert_eq!(built.args[8], "mvn.cmd");
-        assert_eq!(built.args[9], "-pl");
-        assert_eq!(built.args[10], "app");
-        assert_eq!(built.args[11], "exec:java");
-        assert_eq!(
-            built.args[12],
-            "-Dexec.mainClass=com.example.DemoApplication"
-        );
+        assert_eq!(built.args[5], "compile");
+        assert_eq!(built.args[6], "dependency:build-classpath");
+        assert!(built.args[7].starts_with("-Dmdep.outputFile="));
+        assert!(built.args[7].ends_with(".txt"));
+        assert_eq!(built.args[8], "-Dmdep.regenerateFile=true");
+        // 不再包含 install / exec:java 链
+        assert!(!built.args.contains(&"&&".to_string()));
+        assert!(!built.args.contains(&"install".to_string()));
+        assert!(!built.args.contains(&"exec:java".to_string()));
         assert!(built
             .notes
             .iter()
             .any(|n| n.contains("com.example.DemoApplication")));
-        assert!(built.notes.iter().any(|n| n.contains("-am install")));
+        assert!(built.notes.iter().any(|n| n.contains("IDEA 式直跑")));
 
         // 缺少主类必须被拒绝
         let mut missing = sample_config(dir.to_str().unwrap());
@@ -1709,9 +1865,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 单模块工程（根即 Spring Boot 工程，无可选子模块）：保持原直接命令，不加 install 链。
+    /// 单模块工程（根即 Spring Boot 工程，无可选子模块）：同一套两阶段流程，不带 -pl/-am。
     #[test]
-    fn test_source_main_class_single_module_stays_direct() {
+    fn test_source_main_class_single_module_uses_classpath_export() {
         let dir = std::env::temp_dir().join("lsr-process-tests").join(format!(
             "source-single-{}",
             std::process::id()
@@ -1742,12 +1898,23 @@ mod tests {
         assert_eq!(built.args[0], "/c");
         assert_eq!(built.args[1], "mvn.cmd");
         assert_eq!(built.args[2], "compile");
-        assert_eq!(built.args[3], "exec:java");
-        assert_eq!(built.args[4], "-Dexec.mainClass=com.example.SoloApplication");
+        assert_eq!(built.args[3], "dependency:build-classpath");
+        assert!(built.args[4].starts_with("-Dmdep.outputFile="));
+        assert_eq!(built.args[5], "-Dmdep.regenerateFile=true");
+        assert!(!built.args.contains(&"-pl".to_string()));
         assert!(!built.args.contains(&"&&".to_string()));
-        assert!(built.notes.iter().all(|n| !n.contains("-am install")));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_classpath_output_path_is_sanitized() {
+        let p = classpath_output_path("svc-1763456789");
+        assert!(p.to_string_lossy().ends_with("lsr-cp-svc-1763456789.txt"));
+        let weird = classpath_output_path("svc:/\\bad name");
+        let file = weird.file_name().unwrap().to_string_lossy().to_string();
+        assert!(file.starts_with("lsr-cp-"));
+        assert!(!file.contains(':') && !file.contains('/') && !file.contains('\\'));
     }
 
     #[test]
