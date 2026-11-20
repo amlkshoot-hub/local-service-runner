@@ -951,6 +951,22 @@ impl ProcessManager {
         all_args.extend(profile_args.iter().cloned());
         all_args.extend(config.args.iter().cloned());
 
+        // CreateProcessW 的 32767 个 UTF-16 单元上限包含末尾的空字符。
+        let long_command = build_windows_command_line(&java_cmd, &all_args)
+            .encode_utf16()
+            .count()
+            >= 32_767;
+        let classpath_arg = if long_command {
+            // 仅将 classpath 移入 Java 9+ 参数文件，避免改变应用参数的解析方式。
+            let arg_file = cp_file.with_extension("java.args");
+            write_java_classpath_args(&arg_file, &all_args[1])?;
+            let arg = format!("@{}", arg_file.display());
+            all_args.splice(..2, [arg.clone()]);
+            arg
+        } else {
+            format!("-cp <target\\classes + {} 依赖>", dep_count)
+        };
+
         self.log_manager.append_log(
             app_handle,
             &config.id,
@@ -964,9 +980,9 @@ impl ProcessManager {
             app_handle,
             &config.id,
             format!(
-                "Command: {} -cp <target\\classes + {} 依赖> {} {}",
+                "Command: {} {} {} {}",
                 java_cmd,
-                dep_count,
+                classpath_arg,
                 main_class,
                 profile_args.join(" ")
             ),
@@ -1407,6 +1423,50 @@ fn classpath_output_path(service_id: &str) -> std::path::PathBuf {
     std::env::temp_dir()
         .join("local-service-runner")
         .join(format!("lsr-cp-{}.txt", safe))
+}
+
+/// 写入 Java 启动器读取的 classpath 参数文件。
+#[cfg(windows)]
+fn write_java_classpath_args(path: &Path, classpath: &str) -> Result<(), String> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn WideCharToMultiByte(
+            code_page: u32,
+            flags: u32,
+            wide: *const u16,
+            wide_len: i32,
+            bytes: *mut u8,
+            bytes_len: i32,
+            default_char: *const u8,
+            used_default_char: *mut i32,
+        ) -> i32;
+    }
+
+    // Windows Java 启动器按系统 ANSI 代码页读取参数，引号中的反斜杠需要转义。
+    let escaped = classpath.replace('\\', "\\\\").replace('"', "\\\"");
+    let wide: Vec<u16> = format!("-cp\n\"{}\"\n", escaped).encode_utf16().collect();
+    let len = i32::try_from(wide.len()).map_err(|_| "Java classpath 过长".to_string())?;
+    let mut bytes = vec![0; wide.len().saturating_mul(3)];
+    let written = unsafe {
+        WideCharToMultiByte(
+            0, // CP_ACP
+            0,
+            wide.as_ptr(),
+            len,
+            bytes.as_mut_ptr(),
+            i32::try_from(bytes.len()).map_err(|_| "Java classpath 过长".to_string())?,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    if written == 0 {
+        return Err(format!(
+            "转换 Java 参数文件编码失败：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    std::fs::write(path, &bytes[..written as usize])
+        .map_err(|e| format!("写入 Java 参数文件失败（{}）：{}", path.display(), e))
 }
 
 /// 项目目录下存在 mvnw.cmd 则优先使用，否则使用 PATH 中的 mvn.cmd。
