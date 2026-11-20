@@ -357,7 +357,8 @@
               <div class="maven-toolbox">
                 <button
                   class="btn ghost action-btn terminal-btn"
-                  title="在项目目录唤起终端（Windows Terminal / cmd）"
+                  title="显示或收起项目终端"
+                  :aria-expanded="visibleTerminalId === currentService.id"
                   @click="openTerminal"
                 >
                   <AppIcon name="terminal" :size="13" /> 终端
@@ -496,6 +497,15 @@
               </button>
             </div>
           </div>
+          <EmbeddedTerminal
+            v-for="id in activeTerminalIds"
+            :key="id"
+            v-show="currentService?.id === id && visibleTerminalId === id"
+            :service-id="id"
+            :visible="currentService?.id === id && visibleTerminalId === id"
+            @collapse="visibleTerminalId = null"
+            @close="closeTerminal(id)"
+          />
         </div>
 
         <!-- 冷启动引导页：无服务且未开聚合视图 -->
@@ -560,6 +570,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import EmbeddedTerminal from './components/EmbeddedTerminal.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -583,6 +594,11 @@ import type {
 // 服务列表与当前选中
 const services = ref<ServiceConfig[]>([]);
 const currentService = ref<ServiceConfig | null>(null);
+const terminalIds = ref<string[]>([]);
+const visibleTerminalId = ref<string | null>(null);
+const activeTerminalIds = computed(() =>
+  terminalIds.value.filter((id) => services.value.some((service) => service.id === id)),
+);
 const serviceSearch = ref('');
 
 // 侧栏状态快捷筛选（全部 / 运行中 / 已停止）与顶栏胶囊联动
@@ -1220,13 +1236,21 @@ function getMavenTaskGoal(id: string): string {
 }
 
 // 项目终端
-async function openTerminal() {
-  if (!currentService.value) return;
-  try {
-    await invoke('open_service_terminal', { id: currentService.value.id });
-  } catch (err: any) {
-    alert('打开终端失败: ' + (err?.message || err));
+function openTerminal() {
+  const id = currentService.value?.id;
+  if (!id) return;
+  // 切换显示时保留会话，避免中断正在运行的终端命令。
+  if (visibleTerminalId.value === id) {
+    visibleTerminalId.value = null;
+    return;
   }
+  if (!terminalIds.value.includes(id)) terminalIds.value.push(id);
+  visibleTerminalId.value = id;
+}
+
+function closeTerminal(id: string) {
+  terminalIds.value = terminalIds.value.filter((activeId) => activeId !== id);
+  if (visibleTerminalId.value === id) visibleTerminalId.value = null;
 }
 
 // 分组一键启停：按列表顺序串行触发

@@ -66,7 +66,7 @@ Local Service Runner 把这些问题收敛到一个桌面窗口里：服务配�
 - **输出即日志**：构建输出进入该服务的实时日志视窗，GBK/UTF-8 自适应解码；
 - **可中断**：构建中可随时「停止构建」，内核级终结 Maven 进程树，不残留孤儿进程；
 - **互斥防呆**：服务运行中（JAR 被进程锁定）不允许发起构建，构建中不允许启动/重启服务；
-- **项目终端**：一键在服务工作目录唤起终端——优先 Windows Terminal（`wt -d <dir>`），未安装时回退 `cmd.exe` 新窗口；终端独立于本应用生命周期，关闭 Runner 不会连带关闭终端。
+- **项目终端**：点击「终端」在实时控制台下方打开 PowerShell，初始目录为服务工作目录。收起面板保留会话，点击「结束会话」或从托盘退出 Runner 时清理终端及其子进程。
 
 ### 4. Windows 进程树与 Job Object 终极管控（最高优先级）
 - **挂起启动彻底防逃逸**：
@@ -147,7 +147,8 @@ local-service-runner/
 │   │   ├── profiles.rs         # Spring Boot Profile 扫描与参数生成
 │   │   ├── process.rs          # Windows Job Object、挂起启动、受管进程底层与两阶段「构建+JAR」状态机
 │   │   ├── logs.rs             # 异步日志缓冲、GBK/UTF-8 解码、脱敏与事件推送
-│   │   ├── terminal.rs         # 项目终端唤起（wt 优先、cmd 回退）
+│   │   ├── embedded_terminal.rs # 内嵌 PowerShell 会话
+│   │   ├── terminal.rs         # 系统终端唤起接口
 │   │   ├── commands.rs         # 受控 Tauri 命令接口（含目录选择）
 │   │   ├── lib.rs
 │   │   └── main.rs

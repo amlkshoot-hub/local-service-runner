@@ -1,4 +1,5 @@
 use crate::config::{ConfigManager, ServiceConfig};
+use crate::embedded_terminal::TerminalManager;
 use crate::logs::{LogEntry, LogManager};
 use crate::maven::{self, MainClassCandidate, MavenProjectInfo};
 use crate::maven_tasks::{MavenTaskManager, MavenTaskStatus};
@@ -292,6 +293,42 @@ pub fn open_service_terminal(state: State<'_, AppState>, id: String) -> Result<(
     drop(services);
 
     terminal::open_terminal_at(&work_dir)
+}
+
+/// 在服务工作目录启动内嵌终端，并向前端流式发送终端输出。
+#[tauri::command]
+pub fn start_embedded_terminal(
+    state: State<'_, AppState>,
+    terminals: State<'_, TerminalManager>,
+    id: String,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    output: tauri::ipc::Channel<tauri::ipc::Response>,
+) -> Result<(), String> {
+    let work_dir = state.services.lock().unwrap().iter()
+        .find(|service| service.id == id)
+        .map(|service| service.work_dir.clone())
+        .ok_or("找不到服务")?;
+    terminals.open(session_id, std::path::Path::new(&work_dir), cols, rows, output)
+}
+
+/// 将前端键盘输入转发给内嵌终端。
+#[tauri::command]
+pub fn write_embedded_terminal(terminals: State<'_, TerminalManager>, session_id: String, data: String) -> Result<(), String> {
+    terminals.write(&session_id, data)
+}
+
+/// 根据面板尺寸调整内嵌终端的行列数。
+#[tauri::command]
+pub fn resize_embedded_terminal(terminals: State<'_, TerminalManager>, session_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    terminals.resize(&session_id, cols, rows)
+}
+
+/// 结束内嵌终端会话并释放资源。
+#[tauri::command]
+pub fn close_embedded_terminal(terminals: State<'_, TerminalManager>, session_id: String) {
+    terminals.close(&session_id);
 }
 
 // ---------------- 健康检查与资源监控 ----------------

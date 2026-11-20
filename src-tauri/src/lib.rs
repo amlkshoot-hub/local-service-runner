@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod config;
+mod embedded_terminal;
 pub mod health;
 pub mod logs;
 pub mod maven;
@@ -54,6 +55,7 @@ pub fn run() {
             }
         }))
         .manage(app_state)
+        .manage(embedded_terminal::TerminalManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_services,
             commands::save_service,
@@ -74,6 +76,10 @@ pub fn run() {
             commands::detect_main_classes,
             commands::locate_built_jar,
             commands::open_service_terminal,
+            commands::start_embedded_terminal,
+            commands::write_embedded_terminal,
+            commands::resize_embedded_terminal,
+            commands::close_embedded_terminal,
             commands::get_service_health,
             commands::get_service_metrics,
             commands::export_services,
@@ -126,11 +132,12 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(move |_app_handle, event| {
+        .run(move |app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 // 应用退出时清理所有受管理进程与构建任务
                 process_manager.cleanup_all();
                 maven_task_manager.cleanup_all();
+                app_handle.state::<embedded_terminal::TerminalManager>().close_all();
             }
         });
 }
